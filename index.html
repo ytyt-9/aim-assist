@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · MultiPose + ROI + 锁定</title>
+<title>视觉跟随 · 流畅版</title>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
 <style>
@@ -49,11 +49,14 @@
   .lock-badge.active { background: #7cff7c; color: #000; }
   .lock-badge.waiting { background: #ffb74d; color: #000; }
   .lock-badge.off { background: #444; color: #aaa; }
+  .perf { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 0.68rem; font-family: monospace; color: #eee; margin-top: 4px; }
+  .perf span { background: #0a1626; padding: 3px 5px; border-radius: 3px; }
+  .perf b { color: #7cff7c; }
 </style>
 </head>
 <body>
 
-<h1>视觉跟随 · MultiPose + ROI + 锁定</h1>
+<h1>视觉跟随 · MultiPose + ROI + 流畅版</h1>
 
 <div class="video-wrap">
   <video id="video" autoplay playsinline muted></video>
@@ -85,8 +88,8 @@
   <div class="row">
     <label>输入尺寸</label>
     <select id="inputSize">
-      <option value="128">128（最快）</option>
-      <option value="192" selected>192（推荐）</option>
+      <option value="128" selected>128（最快，推荐）</option>
+      <option value="192">192（推荐）</option>
       <option value="256">256（默认）</option>
       <option value="320">320（精度高，慢）</option>
     </select>
@@ -97,6 +100,16 @@
       <option value="3" selected>3</option>
       <option value="5">5</option>
       <option value="6">6</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>推理频率</label>
+    <select id="inferHz">
+      <option value="6">6 Hz（最流畅，反应慢）</option>
+      <option value="10">10 Hz（流畅）</option>
+      <option value="12" selected>12 Hz（推荐平衡）</option>
+      <option value="15">15 Hz（反应快）</option>
+      <option value="20">20 Hz（最灵敏，可能卡）</option>
     </select>
   </div>
 
@@ -162,16 +175,25 @@
     <span>锁定帧: <b id="lockAge">0</b></span>
   </div>
 
+  <!-- ★ 新增：性能监测 -->
+  <div class="perf">
+    <span>推理频率: <b id="inferFps">0</b> Hz</span>
+    <span>摄像头: <b id="camRes">-</b></span>
+  </div>
+
   <div class="warn-box" id="warnBox"></div>
 </div>
 
 <script>
+// ============ 配置 ============
 const WS_PORT = 81;
-const SEND_HZ = 30;
+const SEND_HZ = 30;              // 发送频率（每秒）
+let   INFER_HZ = 12;             // ★ 推理频率（可调），越低画面越流畅
 const KP_SCORE_MIN = 0.30;
 const SMOOTH_ALPHA = 0.55;
 const LOCK_TIMEOUT_FRAMES = 20;
 
+// ============ 状态 ============
 let ws = null;
 let wsConnected = false;
 let videoStream = null;
@@ -179,17 +201,32 @@ let detector = null;
 let running = false;
 let lastSendTime = 0;
 let sentCount = 0;
+
+// 渲染 FPS
 let fpsCount = 0;
 let fpsTimer = 0;
+
+// 推理 FPS
+let inferCount = 0;
+let inferTimer = 0;
+
+// 平滑
 let smoothDx = 0, smoothDy = 0;
 
+// 锁定
 let lockedTrackId = null;
 let lockedMissFrames = 0;
 let lockAge = 0;
 
+// ROI
 let roiEnabled = true;
 let roiPercent = 60;
 
+// ★ 共享的推理结果
+let latestPoses = [];
+let latestPosesTime = 0;
+
+// ============ DOM ============
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
 const ctx = overlay.getContext('2d');
@@ -214,12 +251,16 @@ const targetModeEl = document.getElementById('targetMode');
 const modelTypeEl = document.getElementById('modelType');
 const inputSizeEl = document.getElementById('inputSize');
 const maxPosesEl = document.getElementById('maxPoses');
+const inferHzEl = document.getElementById('inferHz');
 const roiEnabledEl = document.getElementById('roiEnabled');
 const roiPercentEl = document.getElementById('roiPercent');
 const roiPercentValEl = document.getElementById('roiPercentVal');
 const roiInfoEl = document.getElementById('roiInfo');
 const warnBox = document.getElementById('warnBox');
+const inferFpsEl = document.getElementById('inferFps');
+const camResEl = document.getElementById('camRes');
 
+// ============ WebSocket ============
 function connectWs() {
   const ip = espIpEl.value.trim();
   if (!ip) { alert('请输入 ESP32 IP'); return; }
@@ -256,22 +297,28 @@ function sendAim(dx, dy, hasTarget) {
   sentEl.textContent = sentCount;
 }
 
+// ============ 摄像头（高清）============
 async function startCamera() {
   videoStream = await navigator.mediaDevices.getUserMedia({
     video: {
-      width: { ideal: 320 },
-      height: { ideal: 240 },
-      frameRate: { ideal: 30, max: 60 },
+      width:  { min: 640, ideal: 1280 },
+      height: { min: 480, ideal: 720 },
+      frameRate: { min: 24, ideal: 30, max: 60 },
       facingMode: { ideal: 'environment' }
     },
     audio: false
   });
   video.srcObject = videoStream;
   await video.play();
-  overlay.width = video.videoWidth || 320;
-  overlay.height = video.videoHeight || 240;
+
+  // canvas 分辨率跟 video 一致
+  overlay.width  = video.videoWidth  || 1280;
+  overlay.height = video.videoHeight || 720;
+
+  camResEl.textContent = video.videoWidth + '×' + video.videoHeight;
 }
 
+// ============ 关键点工具 ============
 function kpMap(keypoints) {
   const m = {};
   keypoints.forEach(k => { m[k.name] = k; });
@@ -390,8 +437,43 @@ function selectTarget(candidates, mode, screenCx, screenCy, roi) {
   return { target: selected, lockState: 'off' };
 }
 
-async function loop() {
+// ============ ★ 推理循环（独立，不影响画面）============
+async function detectLoop() {
+  while (running) {
+    const t0 = performance.now();
+
+    try {
+      const poses = await detector.estimatePoses(video, {
+        maxPoses: parseInt(maxPosesEl.value),
+        flipHorizontal: false
+      });
+      latestPoses = poses;
+      latestPosesTime = performance.now();
+      inferCount++;
+    } catch (e) {
+      // 忽略偶发错误
+    }
+
+    // 推理 FPS 统计
+    const now = performance.now();
+    if (now - inferTimer >= 1000) {
+      inferFpsEl.textContent = inferCount;
+      inferCount = 0;
+      inferTimer = now;
+    }
+
+    // 让出控制权给浏览器 + 控制推理频率
+    const elapsed = performance.now() - t0;
+    const targetInterval = 1000 / INFER_HZ;
+    const wait = Math.max(0, targetInterval - elapsed);
+    await new Promise(r => setTimeout(r, wait));
+  }
+}
+
+// ============ ★ 渲染循环（独立，rAF 满帧）============
+function renderLoop() {
   if (!running) return;
+
   const now = performance.now();
   const cw = overlay.width, ch = overlay.height;
   const screenCx = cw / 2, screenCy = ch / 2;
@@ -400,13 +482,7 @@ async function loop() {
   const roiH = ch * roiPercent / 100;
   const roi = { x1: (cw - roiW) / 2, y1: (ch - roiH) / 2, x2: (cw + roiW) / 2, y2: (ch + roiH) / 2 };
 
-  let poses = [];
-  try {
-    poses = await detector.estimatePoses(video, {
-      maxPoses: parseInt(maxPosesEl.value),
-      flipHorizontal: false
-    });
-  } catch (e) { }
+  const poses = latestPoses;
 
   ctx.clearRect(0, 0, cw, ch);
   personCountEl.textContent = poses.length;
@@ -414,6 +490,7 @@ async function loop() {
   const part = aimPartEl.value;
   const mode = targetModeEl.value;
 
+  // 构建候选
   const candidates = [];
   for (const pose of poses) {
     const bbox = getBBox(pose.keypoints);
@@ -426,6 +503,7 @@ async function loop() {
     candidates.push({ aim, bbox, keypoints: pose.keypoints, validKpCount, distToCross, trackId, score: 0 });
   }
 
+  // 关键点
   ctx.fillStyle = 'rgba(79,195,247,0.45)';
   for (const pose of poses) {
     for (const k of pose.keypoints) {
@@ -433,6 +511,7 @@ async function loop() {
     }
   }
 
+  // ROI 遮罩
   if (roiEnabled) {
     ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
     ctx.fillRect(0, 0, cw, roi.y1);
@@ -441,12 +520,14 @@ async function loop() {
     ctx.fillRect(roi.x2, roi.y1, cw - roi.x2, roiH);
   }
 
+  // 所有候选框（灰白虚线）
   ctx.strokeStyle = 'rgba(255,255,255,0.25)';
   ctx.lineWidth = 1;
   ctx.setLineDash([3, 3]);
   for (const c of candidates) ctx.strokeRect(c.bbox.x1, c.bbox.y1, c.bbox.w, c.bbox.h);
   ctx.setLineDash([]);
 
+  // ROI 边框
   if (roiEnabled) {
     ctx.strokeStyle = 'rgba(255,82,82,0.85)';
     ctx.lineWidth = 2;
@@ -472,6 +553,7 @@ async function loop() {
     ctx.fillText('ROI ' + roiPercent + '%', roi.x1 + 4, roi.y1 + 11);
   }
 
+  // 选目标
   const result = selectTarget(candidates, mode, screenCx, screenCy, roi);
   const target = result.target;
 
@@ -497,10 +579,12 @@ async function loop() {
     dx = target.aim.x - screenCx;
     dy = target.aim.y - screenCy;
 
+    // 高亮选定目标
     ctx.strokeStyle = '#ffd54f';
     ctx.lineWidth = 2;
     ctx.strokeRect(target.bbox.x1, target.bbox.y1, target.bbox.w, target.bbox.h);
 
+    // 瞄准点
     ctx.fillStyle = '#7cff7c';
     ctx.beginPath();
     ctx.arc(target.aim.x, target.aim.y, 5, 0, Math.PI * 2);
@@ -509,6 +593,7 @@ async function loop() {
     ctx.lineWidth = 1;
     ctx.stroke();
 
+    // 到准星连线
     ctx.strokeStyle = 'rgba(255,213,79,0.55)';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([4, 4]);
@@ -518,6 +603,7 @@ async function loop() {
     ctx.stroke();
     ctx.setLineDash([]);
 
+    // 标签
     ctx.fillStyle = '#ffd54f';
     ctx.font = 'bold 11px monospace';
     const idLabel = target.trackId !== null ? ('#' + target.trackId) : '';
@@ -532,14 +618,16 @@ async function loop() {
     targetScoreEl.textContent = '-';
     lockAgeEl.textContent = lockAge;
 
+    // 无目标时画面中央显示 STOP
     ctx.save();
     ctx.fillStyle = 'rgba(255,82,82,0.85)';
-    ctx.font = 'bold 18px monospace';
+    ctx.font = 'bold 22px monospace';
     ctx.textAlign = 'center';
     ctx.fillText('STOP', cw / 2, ch / 2 - 20);
     ctx.restore();
   }
 
+  // ★ 关键修复：有目标才平滑，无目标立即清零
   if (hasTarget) {
     smoothDx = smoothDx * SMOOTH_ALPHA + dx * (1 - SMOOTH_ALPHA);
     smoothDy = smoothDy * SMOOTH_ALPHA + dy * (1 - SMOOTH_ALPHA);
@@ -551,12 +639,14 @@ async function loop() {
   dxEl.textContent = Math.round(smoothDx);
   dyEl.textContent = Math.round(smoothDy);
 
+  // 发送（限速）
   const interval = 1000 / SEND_HZ;
   if (now - lastSendTime >= interval) {
     lastSendTime = now;
     sendAim(smoothDx, smoothDy, hasTarget);
   }
 
+  // 渲染 FPS
   fpsCount++;
   if (now - fpsTimer >= 1000) {
     const fps = fpsCount;
@@ -564,19 +654,20 @@ async function loop() {
     fpsCount = 0;
     fpsTimer = now;
     if (fps < 8) {
-      warnBox.textContent = '⚠ ' + fps + ' FPS 偏低。建议：输入尺寸降到 128，最大人数改成 3，或改用 SinglePose';
+      warnBox.textContent = '⚠ ' + fps + ' FPS 偏低。建议：推理频率降到 6Hz，输入尺寸降到 128，或改用 SinglePose';
       warnBox.classList.add('show');
     } else if (fps < 15) {
-      warnBox.textContent = '提示：' + fps + ' FPS 可用，若卡顿可降到 128';
+      warnBox.textContent = '提示：' + fps + ' FPS 可用，若卡顿可降推理频率到 6Hz';
       warnBox.classList.add('show');
     } else {
       warnBox.classList.remove('show');
     }
   }
 
-  requestAnimationFrame(loop);
+  requestAnimationFrame(renderLoop);
 }
 
+// ============ 创建检测器 ============
 async function createDetector() {
   const isMulti = (modelTypeEl.value === 'multi');
   const inputSize = parseInt(inputSizeEl.value);
@@ -595,6 +686,7 @@ async function createDetector() {
   return await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, config);
 }
 
+// ============ 启动 / 停止 ============
 async function startAll() {
   if (running) return;
   if (!wsConnected) { alert('请先点"连接"'); return; }
@@ -602,16 +694,31 @@ async function startAll() {
   btnStart.textContent = '加载模型...';
   try {
     if (detector) { try { detector.dispose(); } catch (e) {} detector = null; }
+
+    // 读取推理频率
+    INFER_HZ = parseInt(inferHzEl.value) || 12;
+
     detector = await createDetector();
     if (!videoStream) await startCamera();
+
     lockedTrackId = null;
     lockedMissFrames = 0;
     lockAge = 0;
-    running = true;
-    fpsTimer = performance.now();
+
+    // ★ 重置共享状态
+    latestPoses = [];
+    latestPosesTime = 0;
+    inferCount = 0;
+    inferTimer = performance.now();
     fpsCount = 0;
+    fpsTimer = performance.now();
+
+    running = true;
     btnStart.textContent = '运行中...';
-    loop();
+
+    // ★ 同时启动两个独立循环
+    detectLoop();       // 推理（独立）
+    renderLoop();       // 渲染（独立）
   } catch (err) {
     console.error(err);
     alert('启动失败：' + err.message);
@@ -634,6 +741,8 @@ function stopAll() {
   personCountEl.textContent = '0';
   roiCountEl.textContent = '0';
   fpsEl.textContent = '0';
+  inferFpsEl.textContent = '0';
+  latestPoses = [];
   lockedTrackId = null;
   lockedMissFrames = 0;
   lockAge = 0;
@@ -647,6 +756,7 @@ function resetLock() {
   lockBadge.className = 'lock-badge off';
 }
 
+// ============ 事件绑定 ============
 btnConnect.addEventListener('click', connectWs);
 btnStart.addEventListener('click', startAll);
 btnStop.addEventListener('click', stopAll);
@@ -665,21 +775,35 @@ function updateRoiInfo() {
   roiInfoEl.textContent = roiEnabled ? ('中央 ' + roiPercent + '%') : '已禁用';
 }
 
+// 模型/尺寸/人数改变 → 需要重启
 [modelTypeEl, inputSizeEl, maxPosesEl].forEach(el => {
   el.addEventListener('change', () => {
     if (running) {
-      warnBox.textContent = '设置已改，请点"停止"再"启动"生效';
+      warnBox.textContent = '模型设置已改，请点"停止"再"启动"生效';
       warnBox.classList.add('show');
     }
   });
 });
+
+// ★ 推理频率：运行时也能即时生效，无需重启
+inferHzEl.addEventListener('change', () => {
+  INFER_HZ = parseInt(inferHzEl.value) || 12;
+  if (running) {
+    warnBox.textContent = '推理频率已改为 ' + INFER_HZ + ' Hz（立即生效）';
+    warnBox.classList.add('show');
+    setTimeout(() => warnBox.classList.remove('show'), 2000);
+  }
+});
+
 targetModeEl.addEventListener('change', resetLock);
 
+// IP 保存
 const savedIp = localStorage.getItem('espIp');
 if (savedIp) espIpEl.value = savedIp;
 espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.value));
 
-['modelType', 'inputSize', 'maxPoses', 'aimPart', 'targetMode'].forEach(id => {
+// 偏好保存
+['modelType', 'inputSize', 'maxPoses', 'aimPart', 'targetMode', 'inferHz'].forEach(id => {
   const el = document.getElementById(id);
   const saved = localStorage.getItem('pref_' + id);
   if (saved !== null && el) el.value = saved;
@@ -695,8 +819,10 @@ espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.v
   if (el) el.addEventListener('change', () => localStorage.setItem('pref_' + id, el.value));
 });
 
+// 初始化
 roiEnabled = roiEnabledEl.checked;
 roiPercent = parseInt(roiPercentEl.value);
+INFER_HZ = parseInt(inferHzEl.value) || 12;
 roiPercentValEl.textContent = roiPercent + '%';
 updateRoiInfo();
 </script>
