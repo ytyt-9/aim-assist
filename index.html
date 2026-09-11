@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v32</title>
+<title>视觉跟随 · v33</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -73,11 +73,14 @@
   .info-brake  { color: #7cff7c !important; }
   .info-exit   { color: #ffb74d !important; }
   .info-stop   { color: #4fc3f7 !important; }
+  /* 滑块样式 */
+  input[type=range].slider-range { flex: 1 1 auto; min-width: 0; height: 6px; accent-color: #4fc3f7; cursor: pointer; }
+  .range-val { font-size: 0.72rem; color: #ffd54f; font-family: monospace; min-width: 38px; text-align: right; flex: 0 0 auto; }
 </style>
 </head>
 <body>
 
-<h1>视觉跟随 · v32</h1>
+<h1>视觉跟随 · v33</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -134,7 +137,7 @@
   </div>
 
   <div class="brake-box">
-    <div class="group-label">★ 到位锁死 + 迟滞 + 步长比例（v32）</div>
+    <div class="group-label">★ 到位锁死 + 迟滞 + 步长比例（v33）</div>
     <div class="row">
       <label class="label-brake">刹车距离</label>
       <input type="number" id="brakeDistance" min="10" max="300" step="5" value="60">
@@ -152,27 +155,19 @@
     </div>
     <div class="row">
       <label>步长比例</label>
-      <select id="frameStepRatio">
-        <option value="0.20">20%（最稳，最慢）</option>
-        <option value="0.30">30%（稳）</option>
-        <option value="0.40" selected>40%（推荐）</option>
-        <option value="0.50">50%（平衡）</option>
-        <option value="0.60">60%（快）</option>
-        <option value="0.70">70%（很快）</option>
-        <option value="0.80">80%（极快）</option>
-        <option value="0.90">90%（几乎一步到位）</option>
-        <option value="1.00">100%（不限制，可能过冲）</option>
-      </select>
+      <input type="range" id="frameStepRatio" min="0" max="100" step="1" value="40" class="slider-range">
+      <span class="range-val" id="frameStepRatioVal">40%</span>
     </div>
     <div class="hint">
       <b>画面上的三个参考圆：</b><br>
       · <span class="info-brake"><b>绿色虚线圆</b> = 刹车距离（进入此范围开始减速）</span><br>
       · <span class="info-exit"><b>橙色虚线圆</b> = 退出半径（锁死后超过此范围才重跟）</span><br>
       · <span class="info-stop"><b>蓝色实线圆</b> = 停止半径（进入此范围立即锁死）</span><br>
-      <b>步长比例是什么？</b>每帧最多走剩余距离的百分之几。<br>
+      <b>步长比例（0~100%）：</b>每帧最多走剩余距离的百分之几。<br>
+      · <b>0%</b>：完全不移动（测试用）。<br>
       · <b>小比例（20~30%）</b>：多帧逐步逼近，几乎不可能过冲。<br>
       · <b>大比例（70~90%）</b>：到位快，但配合延迟可能微过冲。<br>
-      <b>其它三层防护仍然生效：</b>到位立即锁死、迟滞退出、反过冲钳制。
+      · <b>100%</b>：不限制单帧步长，只靠停止半径和钳制控制。
     </div>
     <div class="speed-table">
       <span class="hdr">档位</span><span class="hdr">刹车倍率</span><span class="hdr">停止倍率</span>
@@ -251,8 +246,8 @@
   </div>
   <div class="row">
     <label>ROI 大小</label>
-    <input type="range" id="roiPercent" min="30" max="100" step="5" value="60" style="flex:1; accent-color:#4fc3f7;">
-    <span class="roi-info" id="roiPercentVal">60%</span>
+    <input type="range" id="roiPercent" min="0" max="100" step="1" value="60" class="slider-range">
+    <span class="range-val" id="roiPercentVal">60%</span>
   </div>
 
   <div class="sec-title">瞄准设置</div>
@@ -397,7 +392,7 @@ const MOVING_BOOST = 2.0;
 const AIM_SMOOTH_ALPHA = 0.82;
 const LOCK_TIMEOUT_FRAMES = 20;
 
-// v32：每帧步长比例，实时可调
+// v33：每帧步长比例，实时可调（0~1，0 表示完全不移动）
 let FRAME_STEP_RATIO = 0.40;
 
 // 到位锁死 + 迟滞
@@ -495,6 +490,7 @@ const brakeDistanceEl = document.getElementById('brakeDistance');
 const stopRadiusEl = document.getElementById('stopRadius');
 const exitRadiusEl = document.getElementById('exitRadius');
 const frameStepRatioEl = document.getElementById('frameStepRatio');
+const frameStepRatioValEl = document.getElementById('frameStepRatioVal');
 const dirXFlipEl = document.getElementById('dirXFlip');
 const dirYFlipEl = document.getElementById('dirYFlip');
 const roiEnabledEl = document.getElementById('roiEnabled');
@@ -545,10 +541,13 @@ function updateBrakeParams() {
   }
 }
 
+// v33：步长比例 0~100 实时读取
 function updateStepRatio() {
-  FRAME_STEP_RATIO = parseFloat(frameStepRatioEl.value) || 0.40;
-  if (FRAME_STEP_RATIO < 0.05) FRAME_STEP_RATIO = 0.05;
+  const v = parseFloat(frameStepRatioEl.value);
+  FRAME_STEP_RATIO = isNaN(v) ? 0.40 : v / 100;
+  if (FRAME_STEP_RATIO < 0) FRAME_STEP_RATIO = 0;
   if (FRAME_STEP_RATIO > 1.0) FRAME_STEP_RATIO = 1.0;
+  if (frameStepRatioValEl) frameStepRatioValEl.textContent = Math.round(FRAME_STEP_RATIO * 100) + '%';
 }
 
 function getSpeedScale() {
@@ -989,11 +988,13 @@ function renderLoop() {
       let rawDx = dx * adaptiveGain * gainMul;
       let rawDy = dy * adaptiveGain * gainMul;
 
+      // v33：步长比例 0~100%，0 时完全不移动
       const maxStep = Math.min(MAX_MOVE_PER_FRAME, dist * FRAME_STEP_RATIO);
       sendDx = Math.max(-maxStep, Math.min(maxStep, rawDx));
       sendDy = Math.max(-maxStep, Math.min(maxStep, rawDy));
 
-      if (dist > effStop + MIN_SEND * 2) {
+      // 仅在步长比例 > 0 时才应用保底最小步进
+      if (FRAME_STEP_RATIO > 0 && dist > effStop + MIN_SEND * 2) {
         if (Math.abs(rawDx) > 0.3 && Math.abs(sendDx) < MIN_SEND) sendDx = sendDx >= 0 ? MIN_SEND : -MIN_SEND;
         if (Math.abs(rawDy) > 0.3 && Math.abs(sendDy) < MIN_SEND) sendDy = sendDy >= 0 ? MIN_SEND : -MIN_SEND;
       }
@@ -1072,7 +1073,8 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
   for (const p of persons) ctx.strokeRect(p.x1, p.y1, p.w, p.h);
   ctx.setLineDash([]);
 
-  if (roiEnabled) {
+  // ROI 为 0% 时不绘制 ROI 区域
+  if (roiEnabled && roiPercent > 0) {
     ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
     ctx.fillRect(0, 0, cw, roi.y1);
     ctx.fillRect(0, roi.y2, cw, ch - roi.y2);
@@ -1088,9 +1090,7 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     drawText('ROI ' + roiPercent + '%', roi.x1 + 4, roi.y1 + 11);
   }
 
-  // ============================================================
-  // 绘制三个参考圆 + 标注
-  // ============================================================
+  // 三个参考圆 + 标注
   if (latestPersons.length > 0) {
     const scale = getSpeedScale();
     const effBrake = brakeDistance * scale.brake;
@@ -1121,20 +1121,17 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.arc(screenCx, screenCy, effStop, 0, Math.PI * 2);
     ctx.stroke();
 
-    // --- 文字标注（带黑色阴影，便于在浅/深背景上阅读）---
+    // 文字标注
     ctx.font = 'bold 11px monospace';
     ctx.shadowColor = 'rgba(0, 0, 0, 0.95)';
     ctx.shadowBlur = 3;
 
-    // 刹车距离 标签：放在绿色圆正上方外侧
     ctx.fillStyle = 'rgba(124, 255, 124, 0.98)';
     drawText('刹车 ' + Math.round(effBrake) + 'px', screenCx, screenCy - effBrake - 6);
 
-    // 退出半径 标签：放在橙色圆正下方外侧
     ctx.fillStyle = 'rgba(255, 183, 77, 0.98)';
     drawText('退出 ' + Math.round(effExit) + 'px', screenCx, screenCy + effExit + 16);
 
-    // 停止半径 标签：放在蓝色圆正右方外侧
     ctx.fillStyle = 'rgba(79, 195, 247, 0.98)';
     drawText('停止 ' + Math.round(effStop) + 'px', screenCx + effStop + 6, screenCy + 4);
 
@@ -1349,6 +1346,10 @@ exitRadiusEl.addEventListener('change', () => {
   localStorage.setItem('pref_exitRadius', exitRadiusEl.value);
 });
 
+// v33：步长比例滑块（0~100）
+frameStepRatioEl.addEventListener('input', () => {
+  updateStepRatio();
+});
 frameStepRatioEl.addEventListener('change', () => {
   updateStepRatio();
   if (running) {
@@ -1370,12 +1371,23 @@ camFacingEl.addEventListener('change', () => {
 });
 
 roiEnabledEl.addEventListener('change', () => { roiEnabled = roiEnabledEl.checked; updateRoiInfo(); });
+// v33：ROI 大小滑块（0~100）
 roiPercentEl.addEventListener('input', () => {
   roiPercent = parseInt(roiPercentEl.value);
   roiPercentValEl.textContent = roiPercent + '%';
   updateRoiInfo();
 });
-function updateRoiInfo() { roiInfoEl.textContent = roiEnabled ? ('中央 ' + roiPercent + '%') : '已禁用'; }
+roiPercentEl.addEventListener('change', () => {
+  roiPercent = parseInt(roiPercentEl.value);
+  roiPercentValEl.textContent = roiPercent + '%';
+  updateRoiInfo();
+  localStorage.setItem('pref_roiPercent', roiPercentEl.value);
+});
+function updateRoiInfo() {
+  if (!roiEnabled) { roiInfoEl.textContent = '已禁用'; return; }
+  if (roiPercent <= 0) { roiInfoEl.textContent = '0%（不检测）'; return; }
+  roiInfoEl.textContent = '中央 ' + roiPercent + '%';
+}
 
 [camResEl, maxPosesEl].forEach(el => {
   el.addEventListener('change', () => { if (running) showInfo('此设置需要"停止 → 启动"才能生效'); });
@@ -1392,18 +1404,43 @@ const savedIp = localStorage.getItem('espIp');
 if (savedIp) espIpEl.value = savedIp;
 espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.value));
 
+// 恢复常规参数
 ['aimPart', 'targetMode', 'inferHz', 'minScore', 'maxPoses', 'moveSpeed', 'deadZone',
- 'brakeDistance', 'stopRadius', 'exitRadius', 'frameStepRatio', 'dirXFlip', 'dirYFlip'].forEach(id => {
+ 'brakeDistance', 'stopRadius', 'exitRadius', 'dirXFlip', 'dirYFlip'].forEach(id => {
   const el = document.getElementById(id);
   const saved = localStorage.getItem('pref_' + id);
   if (saved !== null && el) el.value = saved;
   if (el) el.addEventListener('change', () => localStorage.setItem('pref_' + id, el.value));
 });
 
+// 恢复步长比例（兼容旧格式：0.40 会转成 40）
+(function restoreStepRatio() {
+  const saved = localStorage.getItem('pref_frameStepRatio');
+  if (saved === null || !frameStepRatioEl) return;
+  let v = parseFloat(saved);
+  if (isNaN(v)) return;
+  if (v <= 1.0) v = v * 100;   // 旧版本以小数存储
+  v = Math.round(v);
+  if (v < 0) v = 0;
+  if (v > 100) v = 100;
+  frameStepRatioEl.value = v;
+})();
+
+// 恢复 ROI 大小（兼容旧格式）
+(function restoreRoiPercent() {
+  const saved = localStorage.getItem('pref_roiPercent');
+  if (saved === null || !roiPercentEl) return;
+  let v = parseInt(saved);
+  if (isNaN(v)) return;
+  if (v < 0) v = 0;
+  if (v > 100) v = 100;
+  roiPercentEl.value = v;
+})();
+
 camResEl.value = 'auto';
 camFacingEl.value = 'user';
 
-['roiEnabled', 'roiPercent'].forEach(id => {
+['roiEnabled'].forEach(id => {
   const el = document.getElementById(id);
   const saved = localStorage.getItem('pref_' + id);
   if (saved !== null && el) {
