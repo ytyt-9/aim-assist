@@ -3,13 +3,12 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v9</title>
+<title>视觉跟随 · v10（后置摄像头）</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
   h1 { font-size: 1rem; margin: 6px 0; color: #4fc3f7; }
 
-  /* ★ 完全恢复 v1/v2 简单结构 */
   .video-wrap { position: relative; width: 100%; max-width: 480px; border: 2px solid #4fc3f7; border-radius: 6px; overflow: hidden; background: #000; }
   video#video { width: 100%; display: block; }
   canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
@@ -17,7 +16,7 @@
   .crosshair { position: absolute; top: 50%; left: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; z-index: 3; }
   .crosshair::before, .crosshair::after { content: ''; position: absolute; background: #ffd54f; box-shadow: 0 0 3px #000; }
   .crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
-  .crosshair::after { top: 10px; left: 0; width: 22px; height: 2px; }
+  .crosshair::after { top: 10px; left: 0; width: 2px; height: 2px; height: 22px; }
   .video-wrap .vstatus { position: absolute; left: 4px; bottom: 4px; background: rgba(0,0,0,0.7); color: #7cff7c; font-family: monospace; font-size: 0.62rem; padding: 2px 5px; border-radius: 3px; z-index: 4; pointer-events: none; }
 
   .panel { width: 100%; max-width: 480px; margin-top: 8px; background: #16213e; border-radius: 6px; padding: 8px; }
@@ -66,7 +65,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v9</h1>
+<h1>视觉跟随 · v10（后置摄像头）</h1>
 
 <div class="video-wrap">
   <video id="video" autoplay playsinline muted></video>
@@ -94,13 +93,20 @@
   <div class="row">
     <label>摄像头</label>
     <select id="camRes">
-      <option value="240" selected>320×240（最省，先试这个）</option>
+      <option value="240" selected>320×240（最省）</option>
       <option value="360">640×360（流畅）</option>
       <option value="480">640×480（推荐）</option>
       <option value="720">1280×720（清晰）</option>
       <option value="1080">1920×1080（最清晰）</option>
     </select>
     <button id="btnReopen" class="ghost" style="flex:0 0 auto; padding:4px 8px; font-size:0.7rem;">重开</button>
+  </div>
+  <div class="row">
+    <label>镜头</label>
+    <select id="camFacing">
+      <option value="environment" selected>后置（默认）</option>
+      <option value="user">前置</option>
+    </select>
   </div>
   <div class="row">
     <label>模型</label>
@@ -225,34 +231,25 @@
 // 库加载器
 // ============================================================
 const LIB_CDNS = [
-  {
-    name: 'jsdelivr',
+  { name: 'jsdelivr',
     tf: 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js',
-    pd: 'https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js'
-  },
-  {
-    name: 'fastly-jsdelivr',
+    pd: 'https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js' },
+  { name: 'fastly-jsdelivr',
     tf: 'https://fastly.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js',
-    pd: 'https://fastly.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js'
-  },
-  {
-    name: 'unpkg',
+    pd: 'https://fastly.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js' },
+  { name: 'unpkg',
     tf: 'https://unpkg.com/@tensorflow/tfjs@4.15.0/dist/tf.min.js',
-    pd: 'https://unpkg.com/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js'
-  }
+    pd: 'https://unpkg.com/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js' }
 ];
 
 function loadScript(src, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     const s = document.createElement('script');
-    s.src = src;
-    s.async = false;
+    s.src = src; s.async = false;
     let done = false;
-    const tid = setTimeout(() => {
-      if (!done) { done = true; reject(new Error('timeout ' + src)); }
-    }, timeoutMs);
+    const tid = setTimeout(() => { if (!done) { done = true; reject(new Error('timeout')); } }, timeoutMs);
     s.onload = () => { if (!done) { done = true; clearTimeout(tid); resolve(); } };
-    s.onerror = () => { if (!done) { done = true; clearTimeout(tid); reject(new Error('load error ' + src)); } };
+    s.onerror = () => { if (!done) { done = true; clearTimeout(tid); reject(new Error('load error')); } };
     document.head.appendChild(s);
   });
 }
@@ -269,12 +266,9 @@ async function loadLibs() {
       if (window.tf && window.poseDetection) {
         statusEl.textContent = '✅ 库已加载（' + cdn.name + '）';
         statusEl.className = 'lib-status ok';
-        console.log('[Libs] loaded from', cdn.name);
         return true;
       }
-    } catch (e) {
-      console.warn('[Libs]', cdn.name, 'failed:', e.message);
-    }
+    } catch (e) { console.warn('[Libs]', cdn.name, 'failed:', e.message); }
   }
   statusEl.textContent = '❌ 所有 CDN 加载失败，请检查网络后刷新页面';
   statusEl.className = 'lib-status err';
@@ -333,7 +327,7 @@ let scaleX = 1, scaleY = 1;
 // ============================================================
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
-const ctx = overlay.getContext('2d');   // ★ 不用 desynchronized
+const ctx = overlay.getContext('2d');
 const espIpEl = document.getElementById('espIp');
 const wsStatusEl = document.getElementById('wsStatus');
 const personCountEl = document.getElementById('personCount');
@@ -357,6 +351,7 @@ const inputSizeEl = document.getElementById('inputSize');
 const maxPosesEl = document.getElementById('maxPoses');
 const inferHzEl = document.getElementById('inferHz');
 const camResEl = document.getElementById('camRes');
+const camFacingEl = document.getElementById('camFacing');
 const canvasSizeEl = document.getElementById('canvasSize');
 const roiEnabledEl = document.getElementById('roiEnabled');
 const roiPercentEl = document.getElementById('roiPercent');
@@ -372,20 +367,10 @@ const vstatusEl = document.getElementById('vstatus');
 // ============================================================
 // 工具
 // ============================================================
-function showError(msg) {
-  warnBox.textContent = msg;
-  warnBox.className = 'warn-box show err';
-}
-function showInfo(msg) {
-  warnBox.textContent = msg;
-  warnBox.className = 'warn-box show';
-}
-function hideWarn() {
-  warnBox.className = 'warn-box';
-}
-function tfReady() {
-  return (typeof window.tf !== 'undefined' && typeof window.poseDetection !== 'undefined');
-}
+function showError(msg) { warnBox.textContent = msg; warnBox.className = 'warn-box show err'; }
+function showInfo(msg)  { warnBox.textContent = msg; warnBox.className = 'warn-box show'; }
+function hideWarn()     { warnBox.className = 'warn-box'; }
+function tfReady()      { return (typeof window.tf !== 'undefined' && typeof window.poseDetection !== 'undefined'); }
 
 // ============================================================
 // WebSocket
@@ -397,20 +382,9 @@ function connectWs() {
   wsStatusEl.textContent = '连接中...';
   wsStatusEl.className = 'status';
   ws = new WebSocket('ws://' + ip + ':' + WS_PORT + '/');
-  ws.onopen = () => {
-    wsConnected = true;
-    wsStatusEl.textContent = '已连接 ' + ip;
-    wsStatusEl.className = 'status ok';
-  };
-  ws.onclose = () => {
-    wsConnected = false;
-    wsStatusEl.textContent = '已断开';
-    wsStatusEl.className = 'status err';
-  };
-  ws.onerror = () => {
-    wsStatusEl.textContent = '连接失败（检查 IP / 同 WiFi / 混合内容）';
-    wsStatusEl.className = 'status err';
-  };
+  ws.onopen = () => { wsConnected = true; wsStatusEl.textContent = '已连接 ' + ip; wsStatusEl.className = 'status ok'; };
+  ws.onclose = () => { wsConnected = false; wsStatusEl.textContent = '已断开'; wsStatusEl.className = 'status err'; };
+  ws.onerror = () => { wsStatusEl.textContent = '连接失败（检查 IP / 同 WiFi / 混合内容）'; wsStatusEl.className = 'status err'; };
 }
 
 function sendAim(dx, dy, hasTarget) {
@@ -427,10 +401,12 @@ function sendAim(dx, dy, hasTarget) {
 }
 
 // ============================================================
-// 摄像头
+// 摄像头（★ 优先后置，四级 fallback）
 // ============================================================
 async function startCamera() {
   const res = camResEl.value;
+  const facing = camFacingEl.value;   // 'environment' 或 'user'
+
   let w, h;
   if      (res === '240')  { w = 320;  h = 240;  }
   else if (res === '360')  { w = 640;  h = 360;  }
@@ -447,40 +423,57 @@ async function startCamera() {
   vstatusEl.textContent = '打开摄像头中...';
   vstatusEl.style.color = '#ffb74d';
 
-  let stream = null;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: w }, height: { ideal: h } },
-      audio: false
-    });
-    console.log('[Camera] OK', JSON.stringify(stream.getVideoTracks()[0].getSettings()));
-  } catch (e1) {
-    console.warn('[Camera] w/h failed:', e1.name, e1.message);
+  const tryGet = async (constraints, label) => {
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-    } catch (e2) {
-      console.error('[Camera] all failed:', e2.name, e2.message);
-      vstatusEl.textContent = '打开失败';
-      vstatusEl.style.color = '#ff5252';
-
-      let reason = '';
-      if (e2.name === 'NotAllowedError') reason = '你拒绝了摄像头权限。请点地址栏🔒 → 网站设置 → 摄像头 → 允许，然后刷新页面。';
-      else if (e2.name === 'NotFoundError') reason = '找不到摄像头设备。';
-      else if (e2.name === 'NotReadableError') reason = '摄像头被其它 App 占用了。';
-      else if (e2.name === 'OverconstrainedError') reason = '摄像头不支持这些参数。';
-      else reason = e2.name + ' / ' + e2.message;
-
-      showError('摄像头打开失败：' + reason);
-      throw e2;
+      const s = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
+      const settings = s.getVideoTracks()[0].getSettings();
+      console.log('[Camera]', label, 'OK', JSON.stringify(settings));
+      return { stream: s, label, settings };
+    } catch (e) {
+      console.warn('[Camera]', label, 'FAIL:', e.name, e.message);
+      return null;
     }
+  };
+
+  let result = null;
+
+  // ★ 尝试 1：后置 + 指定分辨率（ideal，不用 exact 避免安卓拒绝）
+  result = await tryGet({
+    facingMode: { ideal: facing },
+    width: { ideal: w },
+    height: { ideal: h }
+  }, '尝试1 ' + facing + ' ' + w + 'x' + h);
+
+  // 尝试 2：后置（不指定分辨率）
+  if (!result) {
+    result = await tryGet({ facingMode: { ideal: facing } }, '尝试2 ' + facing + ' only');
   }
 
-  videoStream = stream;
-  video.srcObject = stream;
+  // 尝试 3：指定分辨率（不指定前后）
+  if (!result) {
+    result = await tryGet({ width: { ideal: w }, height: { ideal: h } }, '尝试3 ' + w + 'x' + h);
+  }
 
-  try {
-    await video.play();
-  } catch (e) {
+  // 尝试 4：任意摄像头
+  if (!result) {
+    result = await tryGet(true, '尝试4 any');
+  }
+
+  if (!result) {
+    vstatusEl.textContent = '打开失败';
+    vstatusEl.style.color = '#ff5252';
+    showError('摄像头打不开。检查：① 权限是否允许（地址栏🔒 → 网站设置 → 摄像头）② 是否有其它 App 占用（关微信/抖音/相机）③ 换 Chrome/Edge 浏览器');
+    throw new Error('camera failed');
+  }
+
+  videoStream = result.stream;
+
+  // 检查实际用的是哪个摄像头
+  const actualFacing = result.settings.facingMode;
+  console.log('[Camera] Actual facingMode:', actualFacing, 'label:', result.label);
+
+  video.srcObject = videoStream;
+  try { await video.play(); } catch (e) {
     await new Promise(r => setTimeout(r, 100));
     try { await video.play(); } catch (e2) {}
   }
@@ -514,8 +507,16 @@ async function startCamera() {
 
   camResInfoEl.textContent = video.videoWidth + '×' + video.videoHeight;
   canvasInfoEl.textContent = overlay.width + '×' + overlay.height;
-  vstatusEl.textContent = video.videoWidth + '×' + video.videoHeight + ' 已就绪';
+
+  // ★ 状态显示实际使用的镜头
+  const facingLabel = (actualFacing === 'user') ? '前置' : (actualFacing === 'environment') ? '后置' : '未知';
+  vstatusEl.textContent = video.videoWidth + '×' + video.videoHeight + ' · ' + facingLabel;
   vstatusEl.style.color = '#7cff7c';
+
+  // 如果不是期望的镜头，提示用户
+  if (actualFacing && actualFacing !== facing) {
+    showInfo('⚠ 想用' + (facing === 'environment' ? '后置' : '前置') + '但实际用了' + facingLabel + '。可能设备没有该镜头，或浏览器限制。');
+  }
 
   startVideoFpsMonitor();
 }
@@ -589,8 +590,7 @@ function getAimPoint(kps, part) {
     const ls = kp.left_shoulder, rs = kp.right_shoulder;
     const lh = kp.left_hip,      rh = kp.right_hip;
     if (ok(ls) && ok(rs) && ok(lh) && ok(rh)) {
-      return { x: (ls.x + rs.x + lh.x + rh.x) / 4 * scaleX,
-               y: (ls.y + rs.y + lh.y + rh.y) / 4 * scaleY };
+      return { x: (ls.x + rs.x + lh.x + rh.x) / 4 * scaleX, y: (ls.y + rs.y + lh.y + rh.y) / 4 * scaleY };
     }
     const sh = [ls, rs].filter(ok);
     if (sh.length === 2) { const a = avg(sh); return { x: a.x * scaleX, y: a.y * scaleY }; }
@@ -606,8 +606,7 @@ function getAimPoint(kps, part) {
     const knees = [lk, rk].filter(ok);
     const ankles = [la, ra].filter(ok);
     if (knees.length === 2 && ankles.length === 2) {
-      return { x: (lk.x + rk.x + la.x + ra.x) / 4 * scaleX,
-               y: (lk.y + rk.y + la.y + ra.y) / 4 * scaleY };
+      return { x: (lk.x + rk.x + la.x + ra.x) / 4 * scaleX, y: (lk.y + rk.y + la.y + ra.y) / 4 * scaleY };
     }
     if (knees.length > 0) { const a = avg(knees); return { x: a.x * scaleX, y: a.y * scaleY }; }
     if (ankles.length > 0) { const a = avg(ankles); return { x: a.x * scaleX, y: a.y * scaleY }; }
@@ -653,11 +652,8 @@ function selectTarget(candidates, mode, screenCx, screenCy, roi) {
     const locked = candidates.find(c => c.trackId === lockedTrackId);
     if (locked) { lockedMissFrames = 0; lockAge++; return { target: locked, lockState: 'active' }; }
     lockedMissFrames++;
-    if (lockedMissFrames > LOCK_TIMEOUT_FRAMES) {
-      lockedTrackId = null; lockedMissFrames = 0; lockAge = 0;
-    } else {
-      return { target: null, lockState: 'waiting' };
-    }
+    if (lockedMissFrames > LOCK_TIMEOUT_FRAMES) { lockedTrackId = null; lockedMissFrames = 0; lockAge = 0; }
+    else { return { target: null, lockState: 'waiting' }; }
   }
   const eligible = roiEnabled ? candidates.filter(c => inROI(c.aim, roi)) : candidates.slice();
   if (eligible.length === 0) return { target: null, lockState: 'off' };
@@ -673,9 +669,7 @@ function selectTarget(candidates, mode, screenCx, screenCy, roi) {
   }
   if (!selected) return { target: null, lockState: 'off' };
   if (mode === 'locked' && selected.trackId !== null) {
-    lockedTrackId = selected.trackId;
-    lockedMissFrames = 0;
-    lockAge = 0;
+    lockedTrackId = selected.trackId; lockedMissFrames = 0; lockAge = 0;
     return { target: selected, lockState: 'active' };
   }
   return { target: selected, lockState: 'off' };
@@ -697,16 +691,10 @@ async function detectLoop() {
         latestPosesTime = performance.now();
         inferCount++;
       }
-    } catch (e) {
-      console.warn('detect err', e);
-    }
+    } catch (e) { console.warn('detect err', e); }
 
     const now = performance.now();
-    if (now - inferTimer >= 1000) {
-      inferFpsEl.textContent = inferCount;
-      inferCount = 0;
-      inferTimer = now;
-    }
+    if (now - inferTimer >= 1000) { inferFpsEl.textContent = inferCount; inferCount = 0; inferTimer = now; }
 
     const elapsed = performance.now() - t0;
     const targetInterval = 1000 / INFER_HZ;
@@ -739,19 +727,11 @@ function renderLoop() {
   const result = selectTarget(candidates, mode, screenCx, screenCy, roi);
   const target = result.target;
 
-  if (result.lockState === 'active') {
-    lockBadge.textContent = '已锁定 #' + lockedTrackId;
-    lockBadge.className = 'lock-badge active';
-  } else if (result.lockState === 'waiting') {
-    lockBadge.textContent = '等待目标... (' + lockedMissFrames + '/' + LOCK_TIMEOUT_FRAMES + ')';
-    lockBadge.className = 'lock-badge waiting';
-  } else {
-    lockBadge.textContent = '未锁定';
-    lockBadge.className = 'lock-badge off';
-  }
+  if (result.lockState === 'active') { lockBadge.textContent = '已锁定 #' + lockedTrackId; lockBadge.className = 'lock-badge active'; }
+  else if (result.lockState === 'waiting') { lockBadge.textContent = '等待目标... (' + lockedMissFrames + '/' + LOCK_TIMEOUT_FRAMES + ')'; lockBadge.className = 'lock-badge waiting'; }
+  else { lockBadge.textContent = '未锁定'; lockBadge.className = 'lock-badge off'; }
 
   let dx = 0, dy = 0, hasTarget = 0;
-
   if (target) {
     hasTarget = 1;
     dx = target.aim.x - screenCx;
@@ -764,53 +744,35 @@ function renderLoop() {
   if (hasTarget) {
     smoothDx = smoothDx * SMOOTH_ALPHA + dx * (1 - SMOOTH_ALPHA);
     smoothDy = smoothDy * SMOOTH_ALPHA + dy * (1 - SMOOTH_ALPHA);
-  } else {
-    smoothDx = 0;
-    smoothDy = 0;
-  }
+  } else { smoothDx = 0; smoothDy = 0; }
 
   dxEl.textContent = Math.round(smoothDx);
   dyEl.textContent = Math.round(smoothDy);
 
   const interval = 1000 / SEND_HZ;
-  if (now - lastSendTime >= interval) {
-    lastSendTime = now;
-    sendAim(smoothDx, smoothDy, hasTarget);
-  }
+  if (now - lastSendTime >= interval) { lastSendTime = now; sendAim(smoothDx, smoothDy, hasTarget); }
 
   fpsCount++;
   if (now - fpsTimer >= 1000) {
     const fps = fpsCount;
     fpsEl.textContent = fps;
     fpsEl.className = (fps < 20) ? 'bad' : (fps < 40) ? 'warn' : '';
-    fpsCount = 0;
-    fpsTimer = now;
+    fpsCount = 0; fpsTimer = now;
 
     const vidFps = parseInt(videoFpsEl.textContent) || 0;
     const infFps = parseInt(inferFpsEl.textContent) || 0;
     const backend = tfReady() && tf.getBackend ? tf.getBackend() : '?';
 
     let diag = null;
-    if (video.videoWidth === 0) {
-      diag = '⚠ 摄像头没有画面。请点"重开"按钮。';
-    } else if (backend === '?') {
-      diag = '⏳ TF 库还在加载中，请稍等...';
-    } else if (backend !== 'webgl' && backend !== 'webgpu') {
-      diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）';
-    } else if (vidFps > 0 && vidFps < 15) {
-      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 换更低分辨率';
-    } else if (fps < 30) {
-      diag = '⚠ rAF 只有 ' + fps + ' fps —— 把推理频率降到 6Hz';
-    } else if (infFps < 5 && INFER_HZ >= 8) {
-      diag = '⚠ 推理只跑了 ' + infFps + ' Hz（目标 ' + INFER_HZ + '）';
-    }
+    if (video.videoWidth === 0) diag = '⚠ 摄像头没有画面。请点"重开"按钮。';
+    else if (backend === '?') diag = '⏳ TF 库还在加载中，请稍等...';
+    else if (backend !== 'webgl' && backend !== 'webgpu') diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）';
+    else if (vidFps > 0 && vidFps < 15) diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 换更低分辨率';
+    else if (fps < 30) diag = '⚠ rAF 只有 ' + fps + ' fps —— 把推理频率降到 6Hz';
+    else if (infFps < 5 && INFER_HZ >= 8) diag = '⚠ 推理只跑了 ' + infFps + ' Hz（目标 ' + INFER_HZ + '）';
 
-    if (diag) {
-      warnBox.textContent = diag;
-      warnBox.className = 'warn-box show err';
-    } else {
-      warnBox.className = 'warn-box';
-    }
+    if (diag) { warnBox.textContent = diag; warnBox.className = 'warn-box show err'; }
+    else { warnBox.className = 'warn-box'; }
   }
 
   requestAnimationFrame(renderLoop);
@@ -924,13 +886,7 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
 // ============================================================
 async function createDetector() {
   if (!tfReady()) throw new Error('TensorFlow.js 库未加载');
-
-  try {
-    await tf.setBackend('webgl');
-    await tf.ready();
-  } catch (e) {
-    console.warn('WebGL failed, fallback:', e);
-  }
+  try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) { console.warn('WebGL fallback', e); }
   const backend = tf.getBackend();
   tfBackendEl.textContent = backend;
   tfBackendEl.className = (backend === 'webgl' || backend === 'webgpu') ? '' : 'bad';
@@ -967,14 +923,12 @@ async function startAll() {
       const ok = await window.libsPromise;
       if (!ok || !tfReady()) {
         showError('TensorFlow.js 库加载失败。请检查网络，刷新页面后重试。');
-        btnStart.disabled = false;
-        btnStart.textContent = '启动';
+        btnStart.disabled = false; btnStart.textContent = '启动';
         return;
       }
     } catch (e) {
       showError('库加载异常：' + e.message);
-      btnStart.disabled = false;
-      btnStart.textContent = '启动';
+      btnStart.disabled = false; btnStart.textContent = '启动';
       return;
     }
   }
@@ -990,27 +944,14 @@ async function startAll() {
 
     detector = await createDetector();
     if (!videoStream) {
-      try {
-        await startCamera();
-      } catch (e) {
-        btnStart.disabled = false;
-        btnStart.textContent = '启动';
-        return;
-      }
-    } else {
-      applyCanvasSize();
-    }
+      try { await startCamera(); }
+      catch (e) { btnStart.disabled = false; btnStart.textContent = '启动'; return; }
+    } else { applyCanvasSize(); }
 
-    lockedTrackId = null;
-    lockedMissFrames = 0;
-    lockAge = 0;
-    latestPoses = [];
-    latestPosesTime = 0;
-    lastDrawnPosesTime = 0;
-    inferCount = 0;
-    inferTimer = performance.now();
-    fpsCount = 0;
-    fpsTimer = performance.now();
+    lockedTrackId = null; lockedMissFrames = 0; lockAge = 0;
+    latestPoses = []; latestPosesTime = 0; lastDrawnPosesTime = 0;
+    inferCount = 0; inferTimer = performance.now();
+    fpsCount = 0; fpsTimer = performance.now();
 
     running = true;
     btnStart.textContent = '运行中...';
@@ -1019,69 +960,41 @@ async function startAll() {
   } catch (err) {
     console.error(err);
     showError('启动失败：' + err.message);
-    btnStart.disabled = false;
-    btnStart.textContent = '启动';
+    btnStart.disabled = false; btnStart.textContent = '启动';
     running = false;
   }
 }
 
 function stopAll() {
-  running = false;
-  videoFpsRunning = false;
-  btnStart.disabled = false;
-  btnStart.textContent = '启动';
-  if (videoStream) {
-    try { videoStream.getTracks().forEach(t => t.stop()); } catch (e) {}
-    videoStream = null;
-  }
+  running = false; videoFpsRunning = false;
+  btnStart.disabled = false; btnStart.textContent = '启动';
+  if (videoStream) { try { videoStream.getTracks().forEach(t => t.stop()); } catch (e) {} videoStream = null; }
   video.srcObject = null;
   ctx.clearRect(0, 0, overlay.width, overlay.height);
-  personCountEl.textContent = '0';
-  roiCountEl.textContent = '0';
-  fpsEl.textContent = '0';
-  videoFpsEl.textContent = '0';
-  inferFpsEl.textContent = '0';
-  latestPoses = [];
-  lockedTrackId = null;
-  lockedMissFrames = 0;
-  lockAge = 0;
-  vstatusEl.textContent = '已停止';
-  vstatusEl.style.color = '#ffb74d';
+  personCountEl.textContent = '0'; roiCountEl.textContent = '0';
+  fpsEl.textContent = '0'; videoFpsEl.textContent = '0'; inferFpsEl.textContent = '0';
+  latestPoses = []; lockedTrackId = null; lockedMissFrames = 0; lockAge = 0;
+  vstatusEl.textContent = '已停止'; vstatusEl.style.color = '#ffb74d';
 }
 
 function resetLock() {
-  lockedTrackId = null;
-  lockedMissFrames = 0;
-  lockAge = 0;
-  lockBadge.textContent = '未锁定';
-  lockBadge.className = 'lock-badge off';
+  lockedTrackId = null; lockedMissFrames = 0; lockAge = 0;
+  lockBadge.textContent = '未锁定'; lockBadge.className = 'lock-badge off';
 }
 
 async function reopenCamera() {
   hideWarn();
   const wasRunning = running;
-  running = false;
-  videoFpsRunning = false;
+  running = false; videoFpsRunning = false;
   await new Promise(r => setTimeout(r, 200));
-
-  if (videoStream) {
-    try { videoStream.getTracks().forEach(t => t.stop()); } catch (e) {}
-    videoStream = null;
-  }
+  if (videoStream) { try { videoStream.getTracks().forEach(t => t.stop()); } catch (e) {} videoStream = null; }
   video.srcObject = null;
-
   try {
     await startCamera();
-    if (wasRunning) {
-      running = true;
-      detectLoop();
-      renderLoop();
-    }
+    if (wasRunning) { running = true; detectLoop(); renderLoop(); }
     showInfo('摄像头已重开：' + video.videoWidth + '×' + video.videoHeight);
     setTimeout(hideWarn, 2500);
-  } catch (e) {
-    console.warn('reopen failed', e);
-  }
+  } catch (e) { console.warn('reopen failed', e); }
 }
 
 // ============================================================
@@ -1093,20 +1006,15 @@ btnStop.addEventListener('click', stopAll);
 btnResetLock.addEventListener('click', resetLock);
 btnReopen.addEventListener('click', reopenCamera);
 
-roiEnabledEl.addEventListener('change', () => {
-  roiEnabled = roiEnabledEl.checked;
-  updateRoiInfo();
-});
+roiEnabledEl.addEventListener('change', () => { roiEnabled = roiEnabledEl.checked; updateRoiInfo(); });
 roiPercentEl.addEventListener('input', () => {
   roiPercent = parseInt(roiPercentEl.value);
   roiPercentValEl.textContent = roiPercent + '%';
   updateRoiInfo();
 });
-function updateRoiInfo() {
-  roiInfoEl.textContent = roiEnabled ? ('中央 ' + roiPercent + '%') : '已禁用';
-}
+function updateRoiInfo() { roiInfoEl.textContent = roiEnabled ? ('中央 ' + roiPercent + '%') : '已禁用'; }
 
-[modelTypeEl, inputSizeEl, maxPosesEl, camResEl].forEach(el => {
+[modelTypeEl, inputSizeEl, maxPosesEl, camResEl, camFacingEl].forEach(el => {
   el.addEventListener('change', () => {
     if (running) showInfo('此设置需要"停止 → 启动"才能生效');
   });
@@ -1114,19 +1022,13 @@ function updateRoiInfo() {
 
 inferHzEl.addEventListener('change', () => {
   INFER_HZ = parseInt(inferHzEl.value) || 10;
-  if (running) {
-    showInfo('推理频率已改为 ' + INFER_HZ + ' Hz（立即生效）');
-    setTimeout(hideWarn, 2000);
-  }
+  if (running) { showInfo('推理频率已改为 ' + INFER_HZ + ' Hz（立即生效）'); setTimeout(hideWarn, 2000); }
 });
 
 canvasSizeEl.addEventListener('change', () => {
   CANVAS_HEIGHT = parseInt(canvasSizeEl.value) || 360;
   if (video.videoWidth) applyCanvasSize();
-  if (running) {
-    showInfo('画布分辨率已改为 ' + overlay.width + '×' + overlay.height + '（立即生效）');
-    setTimeout(hideWarn, 2000);
-  }
+  if (running) { showInfo('画布分辨率已改为 ' + overlay.width + '×' + overlay.height + '（立即生效）'); setTimeout(hideWarn, 2000); }
 });
 
 targetModeEl.addEventListener('change', resetLock);
@@ -1144,6 +1046,7 @@ espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.v
 
 localStorage.removeItem('pref_camRes');
 camResEl.value = '240';
+camFacingEl.value = 'environment';   // 默认后置
 
 ['roiEnabled', 'roiPercent'].forEach(id => {
   const el = document.getElementById(id);
