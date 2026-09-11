@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v25</title>
+<title>视觉跟随 · v26</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -65,7 +65,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v25</h1>
+<h1>视觉跟随 · v26</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -148,7 +148,7 @@
   <div class="row">
     <label>摄像头</label>
     <select id="camRes">
-      <option value="auto" selected>自动适配</option>
+      <option value="auto" selected>自动适配（低分辨率优先）</option>
       <option value="240">320×240</option>
       <option value="360">640×360</option>
       <option value="480">640×480</option>
@@ -250,6 +250,10 @@
     <span>摄像头: <b id="camResInfo">-</b></span>
     <span>画布: <b id="canvasInfo">-</b></span>
   </div>
+  <div class="perf">
+    <span>推理输入: <b id="inferResInfo">-</b></span>
+    <span>后端: <b id="backendInfo">-</b></span>
+  </div>
 
   <div class="warn-box" id="warnBox"></div>
 </div>
@@ -315,7 +319,7 @@ let   INFER_HZ = 8;
 
 let MOVE_GAIN = 0.20;
 let DEAD_ZONE = 0;
-let MAX_MOVE_PER_FRAME = 60;   // 动态：随速度档位变化
+let MAX_MOVE_PER_FRAME = 60;
 
 const MIN_SEND = 1;
 const STILL_DAMPING = 0.4;
@@ -324,8 +328,14 @@ const MOVING_BOOST = 2.0;
 const AIM_SMOOTH_ALPHA = 0.7;
 const LOCK_TIMEOUT_FRAMES = 20;
 
-// ★ 方向开关（默认：X 正转，Y 正转；value 逻辑不变）
-let DIR_X_FLIP = false;   // 默认正转（不反转）
+// ★ 离屏推理 canvas：把视频帧先画到低分辨率画布，再交给模型
+const inferCanvas = document.createElement('canvas');
+const inferCtx = inferCanvas.getContext('2d');
+const MAX_INFER_W = 640;   // 推理输入最大宽度，640 对精度和速度比较均衡
+const MIN_INFER_W = 320;
+
+// ★ 方向开关（默认：X 正转，Y 正转）
+let DIR_X_FLIP = false;
 let DIR_Y_FLIP = false;
 
 const MODE_LOCKED = 'locked';
@@ -407,6 +417,8 @@ const inferFpsEl = document.getElementById('inferFps');
 const tfBackendEl = document.getElementById('tfBackend');
 const canvasInfoEl = document.getElementById('canvasInfo');
 const camResInfoEl = document.getElementById('camResInfo');
+const inferResInfoEl = document.getElementById('inferResInfo');
+const backendInfoEl = document.getElementById('backendInfo');
 const vstatusEl = document.getElementById('vstatus');
 const libStatusEl = document.getElementById('libStatus');
 
@@ -416,14 +428,11 @@ function hideWarn()     { warnBox.className = 'warn-box'; }
 function tfReady()      { return (typeof window.tf !== 'undefined' && typeof window.cocoSsd !== 'undefined'); }
 function setLibStatus(msg, cls) { libStatusEl.textContent = msg; libStatusEl.className = 'lib-status' + (cls ? ' ' + cls : ''); }
 
-// ★ 根据速度档位动态计算每帧最大移动量
 function updateSpeedParams() {
   MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.20;
-  // 慢速档位限制小，快速档位放开到最大 240
   MAX_MOVE_PER_FRAME = Math.min(240, Math.max(25, MOVE_GAIN * 300));
 }
 
-// ★ 只负责画面 CSS 翻转，跟 dx 方向无关
 function updateMirror() {
   if (camFacingEl.value === 'user') videoWrap.classList.add('flip');
   else videoWrap.classList.remove('flip');
@@ -480,6 +489,7 @@ async function prewarmModel() {
       try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) {}
       const backend = tf.getBackend();
       tfBackendEl.textContent = backend;
+      backendInfoEl.textContent = backend;
       tfBackendEl.className = (backend === 'webgl' || backend === 'webgpu') ? '' : 'bad';
       prewarmedDetector = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
       setLibStatus('✅ 模型已就绪，点"启动"秒开', 'ok');
@@ -508,16 +518,27 @@ async function startCamera() {
   vstatusEl.textContent = '打开摄像头中...';
   vstatusEl.style.color = '#ffb74d';
 
+  // ★ 自动模式：后置也优先低分辨率，避免默认拉到 1080p 导致卡顿
+  const autoCandidates = [
+    { w: 640, h: 480 },
+    { w: 640, h: 360 },
+    { w: 320, h: 240 }
+  ];
   const candidates = (mode === 'auto')
-    ? [{ w: 320, h: 240 }, { w: 640, h: 360 }, { w: 640, h: 480 }, { w: 1280, h: 720 }]
-    : [{ w: parseInt(mode) === 240 ? 320 : parseInt(mode) === 360 ? 640 : parseInt(mode) === 480 ? 640 : parseInt(mode) === 720 ? 1280 : 1920,
-         h: parseInt(mode) === 240 ? 240 : parseInt(mode) === 360 ? 360 : parseInt(mode) === 480 ? 480 : parseInt(mode) === 720 ? 720 : 1080 }];
+    ? autoCandidates
+    : [{ w: parseInt(mode) === 240 ? 320 : parseInt(mode) === 360 ? 640 : parseInt(mode) === 480 ? 640 : 1280,
+         h: parseInt(mode) === 240 ? 240 : parseInt(mode) === 360 ? 360 : parseInt(mode) === 480 ? 480 : 720 }];
 
   let stream = null;
   for (const c of candidates) {
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facing }, width: { ideal: c.w }, height: { ideal: c.h }, frameRate: { ideal: 30, max: 30 } },
+        video: {
+          facingMode: { ideal: facing },
+          width: { ideal: c.w, max: c.w },
+          height: { ideal: c.h, max: c.h },
+          frameRate: { ideal: 30, max: 30 }
+        },
         audio: false
       });
       actualFacing = stream.getVideoTracks()[0].getSettings().facingMode || '';
@@ -526,8 +547,12 @@ async function startCamera() {
   }
 
   if (!stream) {
-    try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facing } }, audio: false }); }
-    catch (e) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facing }, frameRate: { ideal: 30, max: 30 } },
+        audio: false
+      });
+    } catch (e) {
       try { stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); }
       catch (e2) {
         vstatusEl.textContent = '打开失败'; vstatusEl.style.color = '#ff5252';
@@ -537,6 +562,23 @@ async function startCamera() {
     }
     actualFacing = stream.getVideoTracks()[0].getSettings().facingMode || '';
   }
+
+  // ★★★ 核心修复：如果实际拿到的是高分辨率，强制压回 640×480 以内
+  try {
+    const track = stream.getVideoTracks()[0];
+    const s = track.getSettings();
+    if ((s.width && s.width > 640) || (s.height && s.height > 480)) {
+      await track.applyConstraints({
+        width: { max: 640 },
+        height: { max: 480 },
+        frameRate: { ideal: 30, max: 30 }
+      });
+    }
+    // 尝试开启连续对焦/曝光，减少后置因对焦抖动造成的帧率波动（不支持则忽略）
+    try {
+      await track.applyConstraints({ focusMode: 'continuous', exposureMode: 'continuous' });
+    } catch (e) {}
+  } catch (e) {}
 
   videoStream = stream;
   video.srcObject = stream;
@@ -671,8 +713,34 @@ async function detectLoop() {
       if (tfReady() && detector && video.readyState >= 2 && video.videoWidth > 0) {
         const maxBoxes = parseInt(maxPosesEl.value) || 3;
         const minScore = parseFloat(minScoreEl.value) || 0.3;
-        const predictions = await detector.detect(video, maxBoxes, minScore);
-        const persons = predictions.filter(p => p.class === 'person' && p.score >= minScore).map(convertDetection);
+
+        // ★★★ 核心优化：先把视频帧画到低分辨率离屏 canvas，再交给模型
+        const vw = video.videoWidth, vh = video.videoHeight;
+        let iw = Math.min(vw, MAX_INFER_W);
+        iw = Math.max(iw, MIN_INFER_W);
+        if (iw > vw) iw = vw;
+        const ih = Math.max(1, Math.round(vh * iw / vw));
+
+        if (inferCanvas.width !== iw || inferCanvas.height !== ih) {
+          inferCanvas.width = iw;
+          inferCanvas.height = ih;
+        }
+        inferCtx.drawImage(video, 0, 0, iw, ih);
+        inferResInfoEl.textContent = iw + '×' + ih;
+
+        const predictions = await detector.detect(inferCanvas, maxBoxes, minScore);
+        const sx = vw / iw, sy = vh / ih;
+        const persons = predictions
+          .filter(p => p.class === 'person' && p.score >= minScore)
+          .map(p => {
+            const [bx, by, bw, bh] = p.bbox;
+            return convertDetection({
+              bbox: [bx * sx, by * sy, bw * sx, bh * sy],
+              score: p.score,
+              class: p.class
+            });
+          });
+
         latestPersons = persons;
         latestPersonsTime = performance.now();
         inferCount++;
@@ -729,7 +797,6 @@ function renderLoop() {
     aimInitialized = false;
   }
 
-  // 目标速度
   if (hasTarget) {
     const dt = (now - lastAimTime) / 1000;
     if (lastAimTime > 0 && dt > 0.001 && dt < 1) {
@@ -743,22 +810,18 @@ function renderLoop() {
     targetSpeed = 0; lastAimTime = 0;
   }
 
-  // ★ 自适应增益：只在慢速/中速档位启用阻尼，快速档位直接全速跟随
   let adaptiveGain = MOVE_GAIN;
   if (hasTarget) {
     if (MOVE_GAIN < 0.30) {
-      // 慢速模式：目标静止时阻尼，避免过冲
       if (targetSpeed < STILL_THRESHOLD) adaptiveGain = MOVE_GAIN * STILL_DAMPING;
       else if (targetSpeed > STILL_THRESHOLD * 3) adaptiveGain = MOVE_GAIN * MOVING_BOOST;
     }
-    // 快速模式（>=0.30）：不做任何阻尼，全速跟随，实现"瞬间到达"
   }
 
   let dx = 0, dy = 0;
   if (hasTarget) {
     dx = targetAimX - screenCx;
     dy = targetAimY - screenCy;
-    // ★★★ 用户手动方向开关（不再用 mirrored 自动判断）
     if (DIR_X_FLIP) dx = -dx;
     if (DIR_Y_FLIP) dy = -dy;
   }
@@ -797,7 +860,6 @@ function renderLoop() {
     fpsCount = 0; fpsTimer = now;
 
     const vidFps = parseInt(videoFpsEl.textContent) || 0;
-    const infFps = parseInt(inferFpsEl.textContent) || 0;
     const backend = tfReady() && tf.getBackend ? tf.getBackend() : '?';
     let diag = null;
     if (video.videoWidth === 0) diag = '⚠ 摄像头没画面';
@@ -859,7 +921,6 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.strokeRect(target.x1, target.y1, target.w, target.h);
 
     const aim = getAimPoint(target, part);
-    // ★ 绘制屏幕中心到瞄准点的虚线
     ctx.setLineDash([5, 5]);
     ctx.strokeStyle = 'rgba(255, 213, 79, 0.8)';
     ctx.lineWidth = 1.5;
@@ -869,7 +930,6 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // 绿色瞄准点
     ctx.fillStyle = '#7cff7c';
     ctx.beginPath();
     ctx.arc(aim.x, aim.y, 5, 0, Math.PI * 2);
@@ -889,6 +949,7 @@ async function createDetector() {
   try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) {}
   const backend = tf.getBackend();
   tfBackendEl.textContent = backend;
+  backendInfoEl.textContent = backend;
   tfBackendEl.className = (backend === 'webgl' || backend === 'webgpu') ? '' : 'bad';
   return await cocoSsd.load({ base: 'lite_mobilenet_v2' });
 }
@@ -1003,7 +1064,6 @@ btnStop.addEventListener('click', stopAll);
 btnResetLock.addEventListener('click', resetLock);
 btnReopen.addEventListener('click', reopenCamera);
 
-// ★★★ 方向开关：切换立即生效
 dirXFlipEl.addEventListener('change', () => {
   DIR_X_FLIP = (dirXFlipEl.value === 'invert');
   showInfo('X方向：' + (DIR_X_FLIP ? '反转' : '正转') + '（立即生效）');
