@@ -3,19 +3,23 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · 流畅版 v8</title>
+<title>视觉跟随 · v9</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
   h1 { font-size: 1rem; margin: 6px 0; color: #4fc3f7; }
+
+  /* ★ 完全恢复 v1/v2 简单结构 */
   .video-wrap { position: relative; width: 100%; max-width: 480px; border: 2px solid #4fc3f7; border-radius: 6px; overflow: hidden; background: #000; }
   video#video { width: 100%; display: block; }
   canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+
   .crosshair { position: absolute; top: 50%; left: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; z-index: 3; }
   .crosshair::before, .crosshair::after { content: ''; position: absolute; background: #ffd54f; box-shadow: 0 0 3px #000; }
   .crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
   .crosshair::after { top: 10px; left: 0; width: 22px; height: 2px; }
   .video-wrap .vstatus { position: absolute; left: 4px; bottom: 4px; background: rgba(0,0,0,0.7); color: #7cff7c; font-family: monospace; font-size: 0.62rem; padding: 2px 5px; border-radius: 3px; z-index: 4; pointer-events: none; }
+
   .panel { width: 100%; max-width: 480px; margin-top: 8px; background: #16213e; border-radius: 6px; padding: 8px; }
   .row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 0.82rem; flex-wrap: wrap; }
   .row label { flex: 0 0 auto; color: #9bc4e2; font-size: 0.75rem; min-width: 58px; }
@@ -62,7 +66,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · 流畅版 v8</h1>
+<h1>视觉跟随 · v9</h1>
 
 <div class="video-wrap">
   <video id="video" autoplay playsinline muted></video>
@@ -218,7 +222,7 @@
 
 <script>
 // ============================================================
-// 库加载器：多 CDN fallback
+// 库加载器
 // ============================================================
 const LIB_CDNS = [
   {
@@ -329,7 +333,7 @@ let scaleX = 1, scaleY = 1;
 // ============================================================
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
-const ctx = overlay.getContext('2d', { alpha: true, desynchronized: true });
+const ctx = overlay.getContext('2d');   // ★ 不用 desynchronized
 const espIpEl = document.getElementById('espIp');
 const wsStatusEl = document.getElementById('wsStatus');
 const personCountEl = document.getElementById('personCount');
@@ -423,7 +427,7 @@ function sendAim(dx, dy, hasTarget) {
 }
 
 // ============================================================
-// 摄像头（最简约束 + 兜底）
+// 摄像头
 // ============================================================
 async function startCamera() {
   const res = camResEl.value;
@@ -434,7 +438,6 @@ async function startCamera() {
   else if (res === '1080') { w = 1920; h = 1080; }
   else                     { w = 1280; h = 720;  }
 
-  // 关旧流
   if (videoStream) {
     try { videoStream.getTracks().forEach(t => t.stop()); } catch (e) {}
     videoStream = null;
@@ -444,20 +447,17 @@ async function startCamera() {
   vstatusEl.textContent = '打开摄像头中...';
   vstatusEl.style.color = '#ffb74d';
 
-  // ★ 最简约束：只给 width/height，不给 frameRate，不给 facingMode
   let stream = null;
   try {
     stream = await navigator.mediaDevices.getUserMedia({
       video: { width: { ideal: w }, height: { ideal: h } },
       audio: false
     });
-    console.log('[Camera] OK with', w, 'x', h, '->', JSON.stringify(stream.getVideoTracks()[0].getSettings()));
+    console.log('[Camera] OK', JSON.stringify(stream.getVideoTracks()[0].getSettings()));
   } catch (e1) {
     console.warn('[Camera] w/h failed:', e1.name, e1.message);
-    // 兜底：任意摄像头
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      console.log('[Camera] fallback video:true OK');
     } catch (e2) {
       console.error('[Camera] all failed:', e2.name, e2.message);
       vstatusEl.textContent = '打开失败';
@@ -466,9 +466,8 @@ async function startCamera() {
       let reason = '';
       if (e2.name === 'NotAllowedError') reason = '你拒绝了摄像头权限。请点地址栏🔒 → 网站设置 → 摄像头 → 允许，然后刷新页面。';
       else if (e2.name === 'NotFoundError') reason = '找不到摄像头设备。';
-      else if (e2.name === 'NotReadableError') reason = '摄像头被其它 App 占用了（关掉微信/抖音/相机等）。';
-      else if (e2.name === 'OverconstrainedError') reason = '摄像头不支持这些参数（换更低的"摄像头"档位试试）。';
-      else if (e2.name === 'SecurityError') reason = '安全限制：页面必须是 HTTPS，且地址栏🔒里要允许摄像头。';
+      else if (e2.name === 'NotReadableError') reason = '摄像头被其它 App 占用了。';
+      else if (e2.name === 'OverconstrainedError') reason = '摄像头不支持这些参数。';
       else reason = e2.name + ' / ' + e2.message;
 
       showError('摄像头打开失败：' + reason);
@@ -479,24 +478,13 @@ async function startCamera() {
   videoStream = stream;
   video.srcObject = stream;
 
-  // 播放（静音 + 自动播放 + 内联）
-  video.muted = true;
-  video.setAttribute('playsinline', '');
-  video.setAttribute('webkit-playsinline', '');
-  video.setAttribute('autoplay', '');
-
   try {
     await video.play();
   } catch (e) {
-    console.warn('video.play() first try failed:', e);
-    // 有些浏览器需要延迟一下再 play
     await new Promise(r => setTimeout(r, 100));
-    try { await video.play(); } catch (e2) {
-      console.warn('video.play() retry failed:', e2);
-    }
+    try { await video.play(); } catch (e2) {}
   }
 
-  // 等尺寸就绪
   if (video.videoWidth === 0) {
     await new Promise(resolve => {
       let done = false;
@@ -515,7 +503,7 @@ async function startCamera() {
   if (video.videoWidth === 0) {
     vstatusEl.textContent = '无画面';
     vstatusEl.style.color = '#ff5252';
-    showError('摄像头打开了但没画面。请点"重开"按钮，或换浏览器试试。');
+    showError('摄像头打开了但没画面。请点"重开"按钮。');
     return;
   }
 
@@ -804,17 +792,17 @@ function renderLoop() {
 
     let diag = null;
     if (video.videoWidth === 0) {
-      diag = '⚠ 摄像头没有画面。请点"重开"按钮，或检查是否有其它 App 占用摄像头。';
+      diag = '⚠ 摄像头没有画面。请点"重开"按钮。';
     } else if (backend === '?') {
       diag = '⏳ TF 库还在加载中，请稍等...';
     } else if (backend !== 'webgl' && backend !== 'webgpu') {
-      diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）—— 推理会阻塞主线程！换 Chrome 或换设备。';
+      diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）';
     } else if (vidFps > 0 && vidFps < 15) {
-      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 换更低分辨率，或换 Chrome，或关闭其它占用摄像头的 App。';
+      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 换更低分辨率';
     } else if (fps < 30) {
-      diag = '⚠ rAF 只有 ' + fps + ' fps —— 把推理频率降到 6Hz 或画布降一档';
+      diag = '⚠ rAF 只有 ' + fps + ' fps —— 把推理频率降到 6Hz';
     } else if (infFps < 5 && INFER_HZ >= 8) {
-      diag = '⚠ 推理只跑了 ' + infFps + ' Hz（目标 ' + INFER_HZ + '）—— 手机性能不足，降低输入尺寸或改用 SinglePose';
+      diag = '⚠ 推理只跑了 ' + infFps + ' Hz（目标 ' + INFER_HZ + '）';
     }
 
     if (diag) {
