@@ -3,9 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · 流畅版 v6</title>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
+<title>视觉跟随 · 流畅版 v7</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -57,11 +55,14 @@
   .perf b { color: #7cff7c; }
   .perf b.bad { color: #ff5252; }
   .perf b.warn { color: #ffb74d; }
+  .lib-status { font-size: 0.68rem; font-family: monospace; color: #ffb74d; padding: 3px 6px; background: #0a1626; border-radius: 3px; margin-top: 4px; }
+  .lib-status.ok { color: #7cff7c; }
+  .lib-status.err { color: #ff5252; }
 </style>
 </head>
 <body>
 
-<h1>视觉跟随 · 流畅版 v6</h1>
+<h1>视觉跟随 · 流畅版 v7</h1>
 
 <div class="video-wrap">
   <video id="video" autoplay playsinline muted></video>
@@ -71,6 +72,8 @@
 </div>
 
 <div class="panel">
+
+  <div class="lib-status" id="libStatus">⏳ 正在加载 TF.js 库...</div>
 
   <div class="sec-title">连接</div>
   <div class="row">
@@ -214,7 +217,73 @@
 </div>
 
 <script>
-// ============ 配置 ============
+// ============================================================
+// ★ 库加载器：多 CDN fallback
+// ============================================================
+const LIB_CDNS = [
+  {
+    name: 'jsdelivr',
+    tf: 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js',
+    pd: 'https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js'
+  },
+  {
+    name: 'fastly-jsdelivr',
+    tf: 'https://fastly.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js',
+    pd: 'https://fastly.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js'
+  },
+  {
+    name: 'unpkg',
+    tf: 'https://unpkg.com/@tensorflow/tfjs@4.15.0/dist/tf.min.js',
+    pd: 'https://unpkg.com/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js'
+  }
+];
+
+function loadScript(src, timeoutMs = 20000) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = false;
+    let done = false;
+    const tid = setTimeout(() => {
+      if (!done) { done = true; reject(new Error('timeout ' + src)); }
+    }, timeoutMs);
+    s.onload = () => { if (!done) { done = true; clearTimeout(tid); resolve(); } };
+    s.onerror = () => { if (!done) { done = true; clearTimeout(tid); reject(new Error('load error ' + src)); } };
+    document.head.appendChild(s);
+  });
+}
+
+async function loadLibs() {
+  const statusEl = document.getElementById('libStatus');
+  for (let i = 0; i < LIB_CDNS.length; i++) {
+    const cdn = LIB_CDNS[i];
+    try {
+      statusEl.textContent = '⏳ 尝试 CDN ' + (i + 1) + '/' + LIB_CDNS.length + '：' + cdn.name + ' ...';
+      statusEl.className = 'lib-status';
+      await loadScript(cdn.tf);
+      await loadScript(cdn.pd);
+      if (window.tf && window.poseDetection) {
+        statusEl.textContent = '✅ 库已加载（' + cdn.name + '）';
+        statusEl.className = 'lib-status ok';
+        console.log('[Libs] loaded from', cdn.name, 'tf', tf.version_core || tf.version);
+        return true;
+      }
+    } catch (e) {
+      console.warn('[Libs]', cdn.name, 'failed:', e.message);
+    }
+  }
+  statusEl.textContent = '❌ 所有 CDN 加载失败，请检查网络后刷新页面';
+  statusEl.className = 'lib-status err';
+  return false;
+}
+
+// 页面加载时就开始异步加载库
+const libsPromise = loadLibs();
+window.libsPromise = libsPromise;
+
+// ============================================================
+// 配置
+// ============================================================
 const WS_PORT = 81;
 const SEND_HZ = 30;
 let   INFER_HZ = 10;
@@ -224,7 +293,9 @@ const KP_SCORE_MIN = 0.30;
 const SMOOTH_ALPHA = 0.55;
 const LOCK_TIMEOUT_FRAMES = 20;
 
-// ============ 状态 ============
+// ============================================================
+// 状态
+// ============================================================
 let ws = null;
 let wsConnected = false;
 let videoStream = null;
@@ -254,7 +325,9 @@ let lastDrawnPosesTime = 0;
 
 let scaleX = 1, scaleY = 1;
 
-// ============ DOM ============
+// ============================================================
+// DOM
+// ============================================================
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
 const ctx = overlay.getContext('2d', { alpha: true, desynchronized: true });
@@ -293,7 +366,9 @@ const canvasInfoEl = document.getElementById('canvasInfo');
 const camResInfoEl = document.getElementById('camResInfo');
 const vstatusEl = document.getElementById('vstatus');
 
-// ============ 工具 ============
+// ============================================================
+// 工具
+// ============================================================
 function showError(msg) {
   warnBox.textContent = msg;
   warnBox.className = 'warn-box show err';
@@ -305,8 +380,13 @@ function showInfo(msg) {
 function hideWarn() {
   warnBox.className = 'warn-box';
 }
+function tfReady() {
+  return (typeof window.tf !== 'undefined' && typeof window.poseDetection !== 'undefined');
+}
 
-// ============ WebSocket ============
+// ============================================================
+// WebSocket
+// ============================================================
 function connectWs() {
   const ip = espIpEl.value.trim();
   if (!ip) { alert('请输入 ESP32 IP'); return; }
@@ -343,7 +423,9 @@ function sendAim(dx, dy, hasTarget) {
   sentEl.textContent = sentCount;
 }
 
-// ============ 摄像头（三级 fallback，健壮版）============
+// ============================================================
+// 摄像头（三级 fallback）
+// ============================================================
 async function startCamera() {
   const res = camResEl.value;
   let w, h;
@@ -353,7 +435,6 @@ async function startCamera() {
   else if (res === '1080') { w = 1920; h = 1080; }
   else                     { w = 1280; h = 720;  }
 
-  // 先关旧流
   if (videoStream) {
     try { videoStream.getTracks().forEach(t => t.stop()); } catch (e) {}
     videoStream = null;
@@ -362,7 +443,6 @@ async function startCamera() {
   vstatusEl.textContent = '正在打开摄像头...';
   vstatusEl.style.color = '#ffb74d';
 
-  // ★ 三级尝试，从严格到宽松
   const tryGet = async (constraints, label) => {
     try {
       const s = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
@@ -376,28 +456,18 @@ async function startCamera() {
 
   let stream = null;
 
-  // 尝试 1：宽高 + 帧率 + 后置
   stream = await tryGet({
-    width: { ideal: w },
-    height: { ideal: h },
+    width: { ideal: w }, height: { ideal: h },
     frameRate: { ideal: 30 },
     facingMode: { ideal: 'environment' }
-  }, '尝试1 ideal ' + w + 'x' + h + ' 30fps env');
+  }, '尝试1 ideal ' + w + 'x' + h + ' env');
 
-  // 尝试 2：只宽高
   if (!stream) {
-    stream = await tryGet({
-      width: { ideal: w },
-      height: { ideal: h }
-    }, '尝试2 ideal ' + w + 'x' + h);
+    stream = await tryGet({ width: { ideal: w }, height: { ideal: h } }, '尝试2 ideal ' + w + 'x' + h);
   }
-
-  // 尝试 3：只要后置
   if (!stream) {
     stream = await tryGet({ facingMode: 'environment' }, '尝试3 env only');
   }
-
-  // 尝试 4：任意
   if (!stream) {
     stream = await tryGet(true, '尝试4 any');
   }
@@ -412,27 +482,17 @@ async function startCamera() {
   videoStream = stream;
   video.srcObject = stream;
 
-  // 播放（兼容不同浏览器）
-  try {
-    await video.play();
-  } catch (e) {
-    console.warn('video.play() failed:', e);
-    // 再试一次
+  try { await video.play(); } catch (e) {
     try { await video.play(); } catch (e2) { console.warn('retry play failed', e2); }
   }
 
-  // 等元数据就绪
   if (video.videoWidth === 0) {
     await new Promise(resolve => {
       let done = false;
       const check = () => {
         if (done) return;
-        if (video.videoWidth > 0 && video.videoHeight > 0) {
-          done = true;
-          resolve();
-        } else {
-          setTimeout(check, 100);
-        }
+        if (video.videoWidth > 0 && video.videoHeight > 0) { done = true; resolve(); }
+        else setTimeout(check, 100);
       };
       video.addEventListener('loadedmetadata', () => { if (!done) { done = true; resolve(); } });
       setTimeout(() => { if (!done) { done = true; resolve(); } }, 2000);
@@ -448,14 +508,12 @@ async function startCamera() {
   }
 
   applyCanvasSize();
-
   scaleX = overlay.width  / video.videoWidth;
   scaleY = overlay.height / video.videoHeight;
 
   camResInfoEl.textContent = video.videoWidth + '×' + video.videoHeight;
   canvasInfoEl.textContent = overlay.width + '×' + overlay.height;
-
-  vstatusEl.textContent = video.videoWidth + '×' + video.videoHeight + ' @ ' + (video.getVideoPlaybackQuality ? 'live' : '');
+  vstatusEl.textContent = video.videoWidth + '×' + video.videoHeight + ' @ live';
   vstatusEl.style.color = '#7cff7c';
 
   startVideoFpsMonitor();
@@ -473,7 +531,6 @@ function applyCanvasSize() {
   }
 }
 
-// 摄像头真实帧率监测
 function startVideoFpsMonitor() {
   videoFpsRunning = false;
   if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype)) {
@@ -500,7 +557,9 @@ function startVideoFpsMonitor() {
   video.requestVideoFrameCallback(cb);
 }
 
-// ============ 关键点工具 ============
+// ============================================================
+// 关键点工具
+// ============================================================
 function kpMap(keypoints) {
   const m = {};
   keypoints.forEach(k => { m[k.name] = k; });
@@ -621,12 +680,14 @@ function selectTarget(candidates, mode, screenCx, screenCy, roi) {
   return { target: selected, lockState: 'off' };
 }
 
-// ============ 推理循环 ============
+// ============================================================
+// 推理循环
+// ============================================================
 async function detectLoop() {
   while (running) {
     const t0 = performance.now();
     try {
-      if (video.readyState >= 2 && video.videoWidth > 0) {
+      if (tfReady() && detector && video.readyState >= 2 && video.videoWidth > 0) {
         const poses = await detector.estimatePoses(video, {
           maxPoses: parseInt(maxPosesEl.value),
           flipHorizontal: false
@@ -653,14 +714,15 @@ async function detectLoop() {
   }
 }
 
-// ============ 渲染循环 ============
+// ============================================================
+// 渲染循环
+// ============================================================
 function renderLoop() {
   if (!running) return;
   const now = performance.now();
   const cw = overlay.width, ch = overlay.height;
   const screenCx = cw / 2, screenCy = ch / 2;
 
-  // ★ 首次进入时画一次（清掉黑屏）
   if (lastDrawnPosesTime !== latestPosesTime || lastDrawnPosesTime === 0) {
     lastDrawnPosesTime = latestPosesTime || now;
     drawOverlay(cw, ch, screenCx, screenCy);
@@ -723,18 +785,19 @@ function renderLoop() {
     fpsCount = 0;
     fpsTimer = now;
 
-    // 智能诊断
     const vidFps = parseInt(videoFpsEl.textContent) || 0;
     const infFps = parseInt(inferFpsEl.textContent) || 0;
-    const backend = tf.getBackend ? tf.getBackend() : '?';
+    const backend = tfReady() && tf.getBackend ? tf.getBackend() : '?';
 
     let diag = null;
     if (video.videoWidth === 0) {
       diag = '⚠ 摄像头没有画面。请点"重开"按钮，或检查是否有其它 App 占用摄像头。';
+    } else if (backend === '?') {
+      diag = '⏳ TF 库还在加载中，请稍等...';
     } else if (backend !== 'webgl' && backend !== 'webgpu') {
       diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）—— 推理会阻塞主线程！换 Chrome 或换设备。';
     } else if (vidFps > 0 && vidFps < 15) {
-      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 换更低分辨率（320×240），或换 Chrome，或关闭其它占用摄像头的 App。';
+      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 换更低分辨率，或换 Chrome，或关闭其它占用摄像头的 App。';
     } else if (fps < 30) {
       diag = '⚠ rAF 只有 ' + fps + ' fps —— 把推理频率降到 6Hz 或画布降一档';
     } else if (infFps < 5 && INFER_HZ >= 8) {
@@ -845,9 +908,7 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.font = 'bold 11px monospace';
     const idLabel = target.trackId !== null ? ('#' + target.trackId) : '';
     ctx.fillText(idLabel, target.bbox.x1, target.bbox.y1 - 4);
-  } else if (poses.length === 0) {
-    // 没有人物时不画 STOP（避免看起来像黑屏）
-  } else {
+  } else if (poses.length > 0) {
     ctx.save();
     ctx.fillStyle = 'rgba(255,82,82,0.85)';
     ctx.font = 'bold 22px monospace';
@@ -857,8 +918,12 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
   }
 }
 
-// ============ 创建检测器 ============
+// ============================================================
+// 创建检测器
+// ============================================================
 async function createDetector() {
+  if (!tfReady()) throw new Error('TensorFlow.js 库未加载');
+
   try {
     await tf.setBackend('webgl');
     await tf.ready();
@@ -886,11 +951,34 @@ async function createDetector() {
   return await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, config);
 }
 
-// ============ 启动 / 停止 ============
+// ============================================================
+// 启动 / 停止
+// ============================================================
 async function startAll() {
   if (running) return;
   if (!wsConnected) { alert('请先点"连接"'); return; }
+
   btnStart.disabled = true;
+
+  // ★ 关键：先等库加载完成
+  if (!tfReady()) {
+    btnStart.textContent = '等待库加载...';
+    try {
+      const ok = await window.libsPromise;
+      if (!ok || !tfReady()) {
+        showError('TensorFlow.js 库加载失败。请检查网络（能否访问 CDN），刷新页面后重试。');
+        btnStart.disabled = false;
+        btnStart.textContent = '启动';
+        return;
+      }
+    } catch (e) {
+      showError('库加载异常：' + e.message);
+      btnStart.disabled = false;
+      btnStart.textContent = '启动';
+      return;
+    }
+  }
+
   btnStart.textContent = '加载模型...';
   hideWarn();
 
@@ -969,7 +1057,6 @@ function resetLock() {
   lockBadge.className = 'lock-badge off';
 }
 
-// 重开摄像头
 async function reopenCamera() {
   hideWarn();
   const wasRunning = running;
@@ -997,7 +1084,9 @@ async function reopenCamera() {
   }
 }
 
-// ============ 事件绑定 ============
+// ============================================================
+// 事件绑定
+// ============================================================
 btnConnect.addEventListener('click', connectWs);
 btnStart.addEventListener('click', startAll);
 btnStop.addEventListener('click', stopAll);
@@ -1019,9 +1108,7 @@ function updateRoiInfo() {
 
 [modelTypeEl, inputSizeEl, maxPosesEl, camResEl].forEach(el => {
   el.addEventListener('change', () => {
-    if (running) {
-      showInfo('此设置需要"停止 → 启动"才能生效');
-    }
+    if (running) showInfo('此设置需要"停止 → 启动"才能生效');
   });
 });
 
@@ -1055,12 +1142,9 @@ espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.v
   if (el) el.addEventListener('change', () => localStorage.setItem('pref_' + id, el.value));
 });
 
-// ★ 摄像头分辨率：清除旧值，每次都用默认 320×240（防黑屏）
+// 摄像头分辨率每次都用默认 320×240，避免旧 localStorage 值导致打不开
 localStorage.removeItem('pref_camRes');
 camResEl.value = '240';
-camResEl.addEventListener('change', () => {
-  // 不保存到 localStorage，避免下次启动时用错误的值
-});
 
 ['roiEnabled', 'roiPercent'].forEach(id => {
   const el = document.getElementById(id);
