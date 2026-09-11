@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v23</title>
+<title>视觉跟随 · v24</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -63,7 +63,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v23</h1>
+<h1>视觉跟随 · v24</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -94,8 +94,8 @@
     <div class="row">
       <label>X 方向</label>
       <select id="dirXFlip">
-        <option value="normal" selected>正常（不反转）</option>
-        <option value="invert">正转</option>
+        <option value="normal" selected>正转</option>
+        <option value="invert">反转</option>
       </select>
     </div>
     <div class="row">
@@ -314,8 +314,8 @@ const MAX_MOVE_PER_FRAME = 25;
 const AIM_SMOOTH_ALPHA = 0.7;
 const LOCK_TIMEOUT_FRAMES = 20;
 
-// ★ 方向开关（默认：X 正常，Y 正常；value 逻辑不变）
-let DIR_X_FLIP = false;   // 默认正常（不反转）
+// ★ 方向开关（默认：X 正转，Y 正常；value 逻辑不变）
+let DIR_X_FLIP = false;   // 默认正转（不反转）
 let DIR_Y_FLIP = false;
 
 const MODE_LOCKED = 'locked';
@@ -838,6 +838,17 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.strokeRect(target.x1, target.y1, target.w, target.h);
 
     const aim = getAimPoint(target, part);
+    // ★ 绘制屏幕中心到瞄准点的虚线（恢复）
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = 'rgba(255, 213, 79, 0.8)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(screenCx, screenCy);
+    ctx.lineTo(aim.x, aim.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // 绿色瞄准点
     ctx.fillStyle = '#7cff7c';
     ctx.beginPath();
     ctx.arc(aim.x, aim.y, 5, 0, Math.PI * 2);
@@ -974,7 +985,7 @@ btnReopen.addEventListener('click', reopenCamera);
 // ★★★ 方向开关：切换立即生效
 dirXFlipEl.addEventListener('change', () => {
   DIR_X_FLIP = (dirXFlipEl.value === 'invert');
-  showInfo('X方向：' + (DIR_X_FLIP ? '正转' : '正常') + '（立即生效）');
+  showInfo('X方向：' + (DIR_X_FLIP ? '反转' : '正转') + '（立即生效）');
   setTimeout(hideWarn, 1500);
   localStorage.setItem('pref_dirXFlip', dirXFlipEl.value);
 });
