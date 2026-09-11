@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v22</title>
+<title>视觉跟随 · v23</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -59,11 +59,13 @@
   .lib-status { font-size: 0.68rem; font-family: monospace; color: #ffb74d; padding: 3px 6px; background: #0a1626; border-radius: 3px; margin-top: 4px; }
   .lib-status.ok { color: #7cff7c; }
   .lib-status.err { color: #ff5252; }
+  .dir-box { background: #2a0a0a; border: 1px solid #ff5252; border-radius: 4px; padding: 5px 8px; margin-top: 4px; }
+  .dir-box .group-label { color: #ffb74d; font-size: 0.65rem; margin-bottom: 3px; }
 </style>
 </head>
 <body>
 
-<h1>视觉跟随 · v22</h1>
+<h1>视觉跟随 · v23</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -87,6 +89,26 @@
     <span class="status" id="wsStatus">未连接</span>
   </div>
 
+  <!-- ★★★ 方向修正（关键） -->
+  <div class="sec-title">★★ 方向修正（最关键）</div>
+  <div class="dir-box">
+    <div class="group-label">调对方向的判断：人物在画面右边，光标应该向右移。</div>
+    <div class="row">
+      <label>X 方向</label>
+      <select id="dirXFlip">
+        <option value="normal">正常（不反转）</option>
+        <option value="invert" selected>反转（当前反了选这个）</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>Y 方向</label>
+      <select id="dirYFlip">
+        <option value="normal" selected>正常（不反转）</option>
+        <option value="invert">反转</option>
+      </select>
+    </div>
+  </div>
+
   <div class="sec-title">★ 跟随调参</div>
   <div class="row">
     <label>速度</label>
@@ -107,15 +129,12 @@
       <option value="8">8 px</option>
     </select>
   </div>
-  <div class="row" style="font-size:0.65rem;color:#9bc4e2;line-height:1.3;">
-    ★ 注意：ESP32 网页里的"死区"要改成 0，否则会和这里叠加
-  </div>
 
   <div class="sec-title">检测设置</div>
   <div class="row">
     <label>镜头</label>
     <select id="camFacing">
-      <option value="user" selected>前置（默认）</option>
+      <option value="user" selected>前置</option>
       <option value="environment">后置</option>
     </select>
   </div>
@@ -209,7 +228,7 @@
   <div class="stat" style="margin-top:4px;">
     <span>dx: <b id="dx">0</b></span>
     <span>dy: <b id="dy">0</b></span>
-    <span>目标偏移: <b id="lockedId">-</b></span>
+    <span>原始: <b id="lockedId">-</b></span>
   </div>
 
   <div class="perf">
@@ -229,9 +248,6 @@
 </div>
 
 <script>
-// ============================================================
-// 库加载器
-// ============================================================
 const LIB_CDNS = [
   { name: 'jsdelivr',
     tf: 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js',
@@ -251,7 +267,7 @@ function loadScript(src, timeoutMs = 12000) {
     let done = false;
     const tid = setTimeout(() => { if (!done) { done = true; reject(new Error('timeout')); } }, timeoutMs);
     s.onload = () => { if (!done) { done = true; clearTimeout(tid); resolve(); } };
-    s.onerror = () => { if (!done) { done = true; clearTimeout(tid); reject(new Error('load error')); } };
+    s.onerror = () => { if (!done) { done = true; clearTimeout(tid); reject(new Error('error')); } };
     document.head.appendChild(s);
   });
 }
@@ -266,19 +282,19 @@ async function loadLibs() {
   for (let i = 0; i < LIB_CDNS.length; i++) {
     const cdn = LIB_CDNS[i];
     try {
-      statusEl.textContent = '⏳ 加载库（' + cdn.name + '）...';
+      statusEl.textContent = '⏳ 加载（' + cdn.name + '）...';
       statusEl.className = 'lib-status';
       await loadScript(cdn.tf);
       await loadScript(cdn.coco);
       if (window.tf && window.cocoSsd) {
-        statusEl.textContent = '✅ 库已加载（' + cdn.name + '）';
+        statusEl.textContent = '✅ 库已加载';
         statusEl.className = 'lib-status ok';
         localStorage.setItem('lastLibCdn', cdn.name);
         return true;
       }
     } catch (e) {}
   }
-  statusEl.textContent = '❌ 所有 CDN 加载失败，请刷新';
+  statusEl.textContent = '❌ 加载失败，请刷新';
   statusEl.className = 'lib-status err';
   return false;
 }
@@ -286,18 +302,13 @@ async function loadLibs() {
 const libsPromise = loadLibs();
 window.libsPromise = libsPromise;
 
-// ============================================================
-// 配置
-// ============================================================
 const WS_PORT = 81;
 const SEND_HZ = 30;
 let   INFER_HZ = 8;
 
 let MOVE_GAIN = 0.05;
 let DEAD_ZONE = 3;
-// ★ 关键：非零时最小发送 1px，防止被 ESP32 死区吃掉
 const MIN_SEND = 1;
-// ★ 静止降速系数：0.4（原来 0.15 太狠）
 const STILL_DAMPING = 0.4;
 let STILL_THRESHOLD = 30;
 const MOVING_BOOST = 2.0;
@@ -305,14 +316,15 @@ const MAX_MOVE_PER_FRAME = 25;
 const AIM_SMOOTH_ALPHA = 0.7;
 const LOCK_TIMEOUT_FRAMES = 20;
 
-const MODE_LOCKED    = 'locked';
-const MODE_CROSSHAIR = 'crosshair';
-const MODE_LOWEST    = 'lowest';
-const MODE_LARGEST   = 'largest';
+// ★ 方向开关
+let DIR_X_FLIP = true;    // 默认反转（用户说反了）
+let DIR_Y_FLIP = false;
 
-// ============================================================
-// 状态
-// ============================================================
+const MODE_LOCKED = 'locked';
+const MODE_CROSSHAIR = 'crosshair';
+const MODE_LOWEST = 'lowest';
+const MODE_LARGEST = 'largest';
+
 let ws = null;
 let wsConnected = false;
 let videoStream = null;
@@ -320,17 +332,12 @@ let detector = null;
 let running = false;
 let lastSendTime = 0;
 let sentCount = 0;
-let fpsCount = 0;
-let fpsTimer = 0;
-let inferCount = 0;
-let inferTimer = 0;
-let videoFpsCount = 0;
-let videoFpsTimer = 0;
-let videoFpsRunning = false;
+let fpsCount = 0, fpsTimer = 0;
+let inferCount = 0, inferTimer = 0;
+let videoFpsCount = 0, videoFpsTimer = 0, videoFpsRunning = false;
 
 let lockedBox = null;
-let lockedMissFrames = 0;
-let lockAge = 0;
+let lockedMissFrames = 0, lockAge = 0;
 
 let smoothAimX = 0, smoothAimY = 0;
 let aimInitialized = false;
@@ -352,9 +359,6 @@ let prewarmedDetector = null;
 let prewarmKey = '';
 let prewarmPromise = null;
 
-// ============================================================
-// DOM
-// ============================================================
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
 const ctx = overlay.getContext('2d');
@@ -384,6 +388,8 @@ const camResEl = document.getElementById('camRes');
 const camFacingEl = document.getElementById('camFacing');
 const moveSpeedEl = document.getElementById('moveSpeed');
 const deadZoneEl = document.getElementById('deadZone');
+const dirXFlipEl = document.getElementById('dirXFlip');
+const dirYFlipEl = document.getElementById('dirYFlip');
 const roiEnabledEl = document.getElementById('roiEnabled');
 const roiPercentEl = document.getElementById('roiPercent');
 const roiPercentValEl = document.getElementById('roiPercentVal');
@@ -396,24 +402,20 @@ const camResInfoEl = document.getElementById('camResInfo');
 const vstatusEl = document.getElementById('vstatus');
 const libStatusEl = document.getElementById('libStatus');
 
-// ============================================================
-// 工具
-// ============================================================
 function showError(msg) { warnBox.textContent = msg; warnBox.className = 'warn-box show err'; }
 function showInfo(msg)  { warnBox.textContent = msg; warnBox.className = 'warn-box show'; }
 function hideWarn()     { warnBox.className = 'warn-box'; }
 function tfReady()      { return (typeof window.tf !== 'undefined' && typeof window.cocoSsd !== 'undefined'); }
 function setLibStatus(msg, cls) { libStatusEl.textContent = msg; libStatusEl.className = 'lib-status' + (cls ? ' ' + cls : ''); }
 
-function isMirrored() { return camFacingEl.value === 'user'; }
-
+// ★ 只负责画面 CSS 翻转，跟 dx 方向无关
 function updateMirror() {
-  if (isMirrored()) videoWrap.classList.add('flip');
+  if (camFacingEl.value === 'user') videoWrap.classList.add('flip');
   else videoWrap.classList.remove('flip');
 }
 
 function drawText(text, visualX, visualY) {
-  if (isMirrored()) {
+  if (camFacingEl.value === 'user') {
     const cx = overlay.width - visualX;
     ctx.save();
     ctx.translate(cx, visualY);
@@ -425,9 +427,6 @@ function drawText(text, visualX, visualY) {
   }
 }
 
-// ============================================================
-// WebSocket
-// ============================================================
 function connectWs() {
   const ip = espIpEl.value.trim();
   if (!ip) { alert('请输入 ESP32 IP'); return; }
@@ -453,19 +452,14 @@ function sendAim(dx, dy, hasTarget) {
   sentEl.textContent = sentCount;
 }
 
-// ============================================================
-// 预热模型
-// ============================================================
 async function prewarmModel() {
   if (!tfReady()) return;
   const key = 'coco-ssd-lite';
   if (prewarmedDetector && prewarmKey === key) return;
   if (prewarmPromise && prewarmKey === key) { try { await prewarmPromise; } catch (e) {} return; }
   if (prewarmedDetector) { try { prewarmedDetector.dispose(); } catch (e) {} prewarmedDetector = null; }
-
   prewarmKey = key;
-  setLibStatus('⏳ 后台预热 COCO-SSD 模型中...');
-
+  setLibStatus('⏳ 后台预热模型中...');
   prewarmPromise = (async () => {
     try {
       try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) {}
@@ -475,10 +469,9 @@ async function prewarmModel() {
       prewarmedDetector = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
       setLibStatus('✅ 模型已就绪，点"启动"秒开', 'ok');
     } catch (e) {
-      setLibStatus('⚠ 预热失败（点启动时会自动重试）', 'err');
+      setLibStatus('⚠ 预热失败', 'err');
     }
   })();
-
   try { await prewarmPromise; } finally { prewarmPromise = null; }
 }
 
@@ -490,9 +483,6 @@ window.addEventListener('load', () => {
   }, 500);
 });
 
-// ============================================================
-// 摄像头
-// ============================================================
 async function startCamera() {
   const mode = camResEl.value;
   const facing = camFacingEl.value;
@@ -559,7 +549,7 @@ async function startCamera() {
   updateMirror();
 
   const facingLabel = (actualFacing === 'user') ? '前置' : (actualFacing === 'environment') ? '后置' : '未知';
-  vstatusEl.textContent = video.videoWidth + '×' + video.videoHeight + ' · ' + facingLabel + (isMirrored() ? ' · 已翻转' : '');
+  vstatusEl.textContent = video.videoWidth + '×' + video.videoHeight + ' · ' + facingLabel;
   vstatusEl.style.color = '#7cff7c';
 
   startVideoFpsMonitor();
@@ -585,9 +575,6 @@ function startVideoFpsMonitor() {
   video.requestVideoFrameCallback(cb);
 }
 
-// ============================================================
-// bbox 工具
-// ============================================================
 function convertDetection(d) {
   const [bx, by, bw, bh] = d.bbox;
   return { x1: bx, y1: by, x2: bx + bw, y2: by + bh, cx: bx + bw / 2, cy: by + bh / 2, w: bw, h: bh, score: d.score };
@@ -615,9 +602,6 @@ function inROI(point, roi) {
   return point.x >= roi.x1 && point.x <= roi.x2 && point.y >= roi.y1 && point.y <= roi.y2;
 }
 
-// ============================================================
-// 目标选择
-// ============================================================
 function selectTarget(candidates, mode, screenCx, screenCy, roi) {
   const part = aimPartEl.value;
 
@@ -665,9 +649,6 @@ function selectTarget(candidates, mode, screenCx, screenCy, roi) {
   return { target: selected, lockState: 'off' };
 }
 
-// ============================================================
-// 推理循环
-// ============================================================
 async function detectLoop() {
   while (running) {
     const t0 = performance.now();
@@ -692,9 +673,6 @@ async function detectLoop() {
   }
 }
 
-// ============================================================
-// 渲染循环
-// ============================================================
 function renderLoop() {
   if (!running) return;
   const now = performance.now();
@@ -753,49 +731,37 @@ function renderLoop() {
   // 自适应增益
   let adaptiveGain = MOVE_GAIN;
   if (hasTarget) {
-    if (targetSpeed < STILL_THRESHOLD) {
-      adaptiveGain = MOVE_GAIN * STILL_DAMPING;
-    } else if (targetSpeed > STILL_THRESHOLD * 3) {
-      adaptiveGain = MOVE_GAIN * MOVING_BOOST;
-    }
+    if (targetSpeed < STILL_THRESHOLD) adaptiveGain = MOVE_GAIN * STILL_DAMPING;
+    else if (targetSpeed > STILL_THRESHOLD * 3) adaptiveGain = MOVE_GAIN * MOVING_BOOST;
   }
 
   let dx = 0, dy = 0;
   if (hasTarget) {
     dx = targetAimX - screenCx;
     dy = targetAimY - screenCy;
-    if (isMirrored()) dx = -dx;
+    // ★★★ 用户手动方向开关（不再用 mirrored 自动判断）
+    if (DIR_X_FLIP) dx = -dx;
+    if (DIR_Y_FLIP) dy = -dy;
   }
 
-  // ★★★ 核心修复：保证非零值不被归零 ★★★
   let sendDx = 0, sendDy = 0;
   if (hasTarget) {
-    // X 方向
     if (Math.abs(dx) >= DEAD_ZONE) {
       sendDx = dx * adaptiveGain;
-      // ★ 关键：非零发送值至少 ±1
-      if (Math.abs(sendDx) < MIN_SEND) {
-        sendDx = (dx > 0 ? MIN_SEND : -MIN_SEND);
-      }
+      if (Math.abs(sendDx) < MIN_SEND) sendDx = (dx > 0 ? MIN_SEND : -MIN_SEND);
     }
-    // Y 方向
     if (Math.abs(dy) >= DEAD_ZONE) {
       sendDy = dy * adaptiveGain;
-      if (Math.abs(sendDy) < MIN_SEND) {
-        sendDy = (dy > 0 ? MIN_SEND : -MIN_SEND);
-      }
+      if (Math.abs(sendDy) < MIN_SEND) sendDy = (dy > 0 ? MIN_SEND : -MIN_SEND);
     }
-
-    // 饱和
     sendDx = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, sendDx));
     sendDy = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, sendDy));
   }
 
-  // UI 显示
   dxEl.textContent = Math.round(sendDx);
   dyEl.textContent = Math.round(sendDy);
   lockedIdEl.textContent = hasTarget
-    ? ('X=' + Math.round(dx) + ' Y=' + Math.round(dy) + ' 速度=' + Math.round(targetSpeed))
+    ? ('X=' + Math.round(targetAimX - screenCx) + ' Y=' + Math.round(targetAimY - screenCy))
     : '-';
 
   const interval = 1000 / SEND_HZ;
@@ -810,14 +776,23 @@ function renderLoop() {
     fpsEl.textContent = fps;
     fpsEl.className = (fps < 20) ? 'bad' : (fps < 40) ? 'warn' : '';
     fpsCount = 0; fpsTimer = now;
+
+    const vidFps = parseInt(videoFpsEl.textContent) || 0;
+    const infFps = parseInt(inferFpsEl.textContent) || 0;
+    const backend = tfReady() && tf.getBackend ? tf.getBackend() : '?';
+    let diag = null;
+    if (video.videoWidth === 0) diag = '⚠ 摄像头没画面';
+    else if (backend !== 'webgl' && backend !== 'webgpu') diag = '⚠ TF 后端不是 webgl';
+    else if (vidFps > 0 && vidFps < 15) diag = '⚠ 摄像头只有 ' + vidFps + ' fps';
+    else if (fps < 30) diag = '⚠ rAF 只有 ' + fps + ' fps';
+    else if (latestPersons.length === 0) diag = '⚠ 没检测到"人"';
+    if (diag) { warnBox.textContent = diag; warnBox.className = 'warn-box show err'; }
+    else { warnBox.className = 'warn-box'; }
   }
 
   requestAnimationFrame(renderLoop);
 }
 
-// ============================================================
-// 画覆盖层
-// ============================================================
 function drawOverlay(cw, ch, screenCx, screenCy) {
   ctx.clearRect(0, 0, cw, ch);
   const part = aimPartEl.value;
@@ -879,9 +854,6 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
   }
 }
 
-// ============================================================
-// 创建检测器
-// ============================================================
 async function createDetector() {
   if (!tfReady()) throw new Error('库未加载');
   try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) {}
@@ -891,9 +863,6 @@ async function createDetector() {
   return await cocoSsd.load({ base: 'lite_mobilenet_v2' });
 }
 
-// ============================================================
-// 启动 / 停止
-// ============================================================
 async function startAll() {
   if (running) return;
   if (!wsConnected) { alert('请先点"连接"'); return; }
@@ -933,6 +902,8 @@ async function startAll() {
     INFER_HZ = parseInt(inferHzEl.value) || 8;
     MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.05;
     DEAD_ZONE = parseFloat(deadZoneEl.value) || 3;
+    DIR_X_FLIP = (dirXFlipEl.value === 'invert');
+    DIR_Y_FLIP = (dirYFlipEl.value === 'invert');
 
     if (!videoStream) {
       try { await startCamera(); }
@@ -1002,6 +973,20 @@ btnStop.addEventListener('click', stopAll);
 btnResetLock.addEventListener('click', resetLock);
 btnReopen.addEventListener('click', reopenCamera);
 
+// ★★★ 方向开关：切换立即生效
+dirXFlipEl.addEventListener('change', () => {
+  DIR_X_FLIP = (dirXFlipEl.value === 'invert');
+  showInfo('X方向：' + (DIR_X_FLIP ? '反转' : '正常') + '（立即生效）');
+  setTimeout(hideWarn, 1500);
+  localStorage.setItem('pref_dirXFlip', dirXFlipEl.value);
+});
+dirYFlipEl.addEventListener('change', () => {
+  DIR_Y_FLIP = (dirYFlipEl.value === 'invert');
+  showInfo('Y方向：' + (DIR_Y_FLIP ? '反转' : '正常') + '（立即生效）');
+  setTimeout(hideWarn, 1500);
+  localStorage.setItem('pref_dirYFlip', dirYFlipEl.value);
+});
+
 moveSpeedEl.addEventListener('change', () => {
   MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.05;
   if (running) { showInfo('速度改为 ' + MOVE_GAIN); setTimeout(hideWarn, 1500); }
@@ -1041,7 +1026,7 @@ const savedIp = localStorage.getItem('espIp');
 if (savedIp) espIpEl.value = savedIp;
 espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.value));
 
-['aimPart', 'targetMode', 'inferHz', 'minScore', 'maxPoses', 'moveSpeed', 'deadZone'].forEach(id => {
+['aimPart', 'targetMode', 'inferHz', 'minScore', 'maxPoses', 'moveSpeed', 'deadZone', 'dirXFlip', 'dirYFlip'].forEach(id => {
   const el = document.getElementById(id);
   const saved = localStorage.getItem('pref_' + id);
   if (saved !== null && el) el.value = saved;
@@ -1066,6 +1051,8 @@ roiPercent = parseInt(roiPercentEl.value);
 INFER_HZ = parseInt(inferHzEl.value) || 8;
 MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.05;
 DEAD_ZONE = parseFloat(deadZoneEl.value) || 3;
+DIR_X_FLIP = (dirXFlipEl.value === 'invert');
+DIR_Y_FLIP = (dirYFlipEl.value === 'invert');
 roiPercentValEl.textContent = roiPercent + '%';
 updateRoiInfo();
 </script>
