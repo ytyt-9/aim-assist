@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v17</title>
+<title>视觉跟随 · v18</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -12,7 +12,7 @@
   video#video { width: 100%; display: block; }
   canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
 
-  /* ★ 前置摄像头时，加 .flip 类让 video 和 canvas 一起水平翻转 */
+  /* ★ 前置：video 和 canvas 一起水平翻转（视觉上"正常视角"） */
   .video-wrap.flip video,
   .video-wrap.flip canvas {
     transform: scaleX(-1);
@@ -86,7 +86,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v17</h1>
+<h1>视觉跟随 · v18</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -344,7 +344,7 @@ let latestPosesTime = 0;
 let lastDrawnPosesTime = 0;
 
 let actualFacing = '';
-let mirrored = false;   // ★ 当前是否处于镜像显示（前置为 true）
+let mirrored = false;
 
 let prewarmedDetector = null;
 let prewarmKey = '';
@@ -404,9 +404,6 @@ function hideWarn()     { warnBox.className = 'warn-box'; }
 function tfReady()      { return (typeof window.tf !== 'undefined' && typeof window.poseDetection !== 'undefined'); }
 function setLibStatus(msg, cls) { libStatusEl.textContent = msg; libStatusEl.className = 'lib-status' + (cls ? ' ' + cls : ''); }
 
-// ★ 根据实际镜头设置翻转状态
-// 前置摄像头：浏览器默认给的是镜像，我们要 scaleX(-1) 翻回"正常视角"
-// 后置摄像头：本来就不是镜像，不翻
 function updateMirror() {
   mirrored = (actualFacing === 'user');
   if (mirrored) {
@@ -415,6 +412,22 @@ function updateMirror() {
     videoWrap.classList.remove('flip');
   }
   console.log('[Mirror]', mirrored ? 'ON (前置)' : 'OFF (后置/未知)');
+}
+
+// ★ 画文字：自动处理"canvas CSS 翻转"带来的文字反转
+// 传参用"视觉坐标"（也就是你在屏幕上看到的位置）
+function drawText(text, visualX, visualY) {
+  if (mirrored) {
+    // canvas 内部位置 = cw - 视觉位置
+    const cx = overlay.width - visualX;
+    ctx.save();
+    ctx.translate(cx, visualY);
+    ctx.scale(-1, 1);
+    ctx.fillText(text, 0, 0);
+    ctx.restore();
+  } else {
+    ctx.fillText(text, visualX, visualY);
+  }
 }
 
 // ============================================================
@@ -633,14 +646,12 @@ async function startCamera() {
     return;
   }
 
-  // ★ canvas 内部尺寸 = video 内部尺寸
   overlay.width  = video.videoWidth;
   overlay.height = video.videoHeight;
 
   camResInfoEl.textContent = video.videoWidth + '×' + video.videoHeight;
   canvasInfoEl.textContent = overlay.width + '×' + overlay.height;
 
-  // ★ 根据实际镜头应用镜像
   updateMirror();
 
   const facingLabel = (actualFacing === 'user') ? '前置' : (actualFacing === 'environment') ? '后置' : '未知';
@@ -677,7 +688,7 @@ function startVideoFpsMonitor() {
 }
 
 // ============================================================
-// 关键点工具（canvas 尺寸 = video 尺寸，坐标直接对应）
+// 关键点工具
 // ============================================================
 function kpMap(keypoints) {
   const m = {};
@@ -852,7 +863,6 @@ function renderLoop() {
     hasTarget = 1;
     dx = target.aim.x - screenCx;
     dy = target.aim.y - screenCy;
-    // ★ 镜像时 dx 取反（画面翻转过，坐标方向反了）
     if (mirrored) dx = -dx;
     lockedIdEl.textContent = target.trackId !== null ? target.trackId : '-';
   } else {
@@ -922,6 +932,7 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
   const poses = latestPoses;
   personCountEl.textContent = poses.length;
 
+  // 关键点
   ctx.fillStyle = 'rgba(79,195,247,0.55)';
   for (const pose of poses) {
     for (const k of pose.keypoints) {
@@ -929,6 +940,7 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     }
   }
 
+  // ROI 遮罩
   if (roiEnabled) {
     ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
     ctx.fillRect(0, 0, cw, roi.y1);
@@ -937,6 +949,7 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.fillRect(roi.x2, roi.y1, cw - roi.x2, roiH);
   }
 
+  // 候选框
   const candidates = buildCandidates(poses, part, screenCx, screenCy);
   ctx.strokeStyle = 'rgba(255,255,255,0.25)';
   ctx.lineWidth = 1;
@@ -944,6 +957,7 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
   for (const c of candidates) ctx.strokeRect(c.bbox.x1, c.bbox.y1, c.bbox.w, c.bbox.h);
   ctx.setLineDash([]);
 
+  // ROI 红框
   if (roiEnabled) {
     ctx.strokeStyle = 'rgba(255,82,82,0.85)';
     ctx.lineWidth = 2;
@@ -952,7 +966,8 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.setLineDash([]);
     ctx.fillStyle = 'rgba(255,82,82,0.85)';
     ctx.font = 'bold 10px monospace';
-    ctx.fillText('ROI ' + roiPercent + '%', roi.x1 + 4, roi.y1 + 11);
+    // ★ 用 drawText：ROI 对称，视觉位置 = 内部位置
+    drawText('ROI ' + roiPercent + '%', roi.x1 + 4, roi.y1 + 11);
   }
 
   const mode = targetModeEl.value;
@@ -964,10 +979,12 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
   roiCountEl.textContent = roiCount;
 
   if (target) {
+    // 黄框
     ctx.strokeStyle = '#ffd54f';
     ctx.lineWidth = 2;
     ctx.strokeRect(target.bbox.x1, target.bbox.y1, target.bbox.w, target.bbox.h);
 
+    // 绿点
     ctx.fillStyle = '#7cff7c';
     ctx.beginPath();
     ctx.arc(target.aim.x, target.aim.y, 5, 0, Math.PI * 2);
@@ -976,6 +993,7 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.lineWidth = 1;
     ctx.stroke();
 
+    // 虚线连线
     ctx.strokeStyle = 'rgba(255,213,79,0.55)';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([4, 4]);
@@ -985,16 +1003,19 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.stroke();
     ctx.setLineDash([]);
 
+    // 人物 ID 标签
     ctx.fillStyle = '#ffd54f';
     ctx.font = 'bold 11px monospace';
     const idLabel = target.trackId !== null ? ('#' + target.trackId) : '';
-    ctx.fillText(idLabel, target.bbox.x1, target.bbox.y1 - 4);
+    // ★ 视觉左边界 = cw - 内部右边界（因为镜像）
+    drawText(idLabel, cw - target.bbox.x2, target.bbox.y1 - 4);
   } else if (poses.length > 0) {
     ctx.save();
     ctx.fillStyle = 'rgba(255,82,82,0.85)';
     ctx.font = 'bold 22px monospace';
     ctx.textAlign = 'center';
-    ctx.fillText('STOP', cw / 2, ch / 2 - 20);
+    // STOP 居中，视觉位置 = 内部位置
+    drawText('STOP', cw / 2, ch / 2 - 20);
     ctx.restore();
   }
 }
@@ -1159,7 +1180,6 @@ espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.v
 camResEl.value = 'auto';
 camFacingEl.value = 'user';
 
-// 清理旧的翻转设置（不再使用）
 localStorage.removeItem('flipEnabled');
 
 ['roiEnabled', 'roiPercent'].forEach(id => {
