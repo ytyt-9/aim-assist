@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v26</title>
+<title>视觉跟随 · v27</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -49,6 +49,7 @@
   .lock-badge.active { background: #7cff7c; color: #000; }
   .lock-badge.waiting { background: #ffb74d; color: #000; }
   .lock-badge.off { background: #444; color: #aaa; }
+  .lock-badge.arrive { background: #4fc3f7; color: #000; }
   .perf { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: 0.68rem; font-family: monospace; color: #eee; margin-top: 4px; }
   .perf span { background: #0a1626; padding: 3px 5px; border-radius: 3px; }
   .perf b { color: #7cff7c; }
@@ -65,7 +66,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v26</h1>
+<h1>视觉跟随 · v27</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -135,6 +136,10 @@
     · <b>死区越小</b>（如 0px）：对准越精确，但接近目标时可能反复微抖（振荡）。<br>
     · <b>死区越大</b>（如 8px）：画面更稳，但可能停在离准星还有一点距离的地方。<br>
     · 想"瞬间到位"，把死区设为 0，速度设为"瞬间"。
+  </div>
+  <div class="hint">
+    <b>到位锁定（v27 新增）：</b>当光标距离目标小于 <b>6px</b> 并连续 <b>4 帧</b>保持，就自动锁死不再输出移动；<br>
+    只有目标偏移超过 <b>18px</b>（迟滞解锁）才重新跟随。这能彻底消除到位后的微抖，像锁死一样稳。
   </div>
 
   <div class="sec-title">检测设置</div>
@@ -218,6 +223,7 @@
   <div class="row">
     <label>锁定状态</label>
     <span class="lock-badge off" id="lockBadge">未锁定</span>
+    <span class="lock-badge off" id="arriveBadge">未到位</span>
     <button id="btnResetLock" class="warn" style="margin-left:auto; padding:4px 10px; font-size:0.72rem;">重置锁定</button>
   </div>
 
@@ -328,10 +334,15 @@ const MOVING_BOOST = 2.0;
 const AIM_SMOOTH_ALPHA = 0.7;
 const LOCK_TIMEOUT_FRAMES = 20;
 
-// ★ 离屏推理 canvas：把视频帧先画到低分辨率画布，再交给模型
+// ★★★ 到位锁定（迟滞）参数
+const ARRIVE_RADIUS = 6;      // 进入"到位"的偏差半径（像素）
+const LEAVE_RADIUS = 18;      // 离开"到位"的偏差半径（像素），必须大于 ARRIVE_RADIUS 形成迟滞
+const ARRIVE_FRAMES = 4;      // 连续多少帧在到位半径内才锁定
+
+// ★ 离屏推理 canvas
 const inferCanvas = document.createElement('canvas');
 const inferCtx = inferCanvas.getContext('2d');
-const MAX_INFER_W = 640;   // 推理输入最大宽度，640 对精度和速度比较均衡
+const MAX_INFER_W = 640;
 const MIN_INFER_W = 320;
 
 // ★ 方向开关（默认：X 正转，Y 正转）
@@ -356,6 +367,10 @@ let videoFpsCount = 0, videoFpsTimer = 0, videoFpsRunning = false;
 
 let lockedBox = null;
 let lockedMissFrames = 0, lockAge = 0;
+
+// ★ 到位锁定状态
+let arrivedFrames = 0;
+let lockedAtTarget = false;
 
 let smoothAimX = 0, smoothAimY = 0;
 let aimInitialized = false;
@@ -392,6 +407,7 @@ const dxEl = document.getElementById('dx');
 const dyEl = document.getElementById('dy');
 const lockedIdEl = document.getElementById('lockedId');
 const lockBadge = document.getElementById('lockBadge');
+const arriveBadge = document.getElementById('arriveBadge');
 const btnConnect = document.getElementById('btnConnect');
 const btnStart = document.getElementById('btnStart');
 const btnStop = document.getElementById('btnStop');
@@ -518,7 +534,6 @@ async function startCamera() {
   vstatusEl.textContent = '打开摄像头中...';
   vstatusEl.style.color = '#ffb74d';
 
-  // ★ 自动模式：后置也优先低分辨率，避免默认拉到 1080p 导致卡顿
   const autoCandidates = [
     { w: 640, h: 480 },
     { w: 640, h: 360 },
@@ -563,7 +578,6 @@ async function startCamera() {
     actualFacing = stream.getVideoTracks()[0].getSettings().facingMode || '';
   }
 
-  // ★★★ 核心修复：如果实际拿到的是高分辨率，强制压回 640×480 以内
   try {
     const track = stream.getVideoTracks()[0];
     const s = track.getSettings();
@@ -574,7 +588,6 @@ async function startCamera() {
         frameRate: { ideal: 30, max: 30 }
       });
     }
-    // 尝试开启连续对焦/曝光，减少后置因对焦抖动造成的帧率波动（不支持则忽略）
     try {
       await track.applyConstraints({ focusMode: 'continuous', exposureMode: 'continuous' });
     } catch (e) {}
@@ -714,7 +727,6 @@ async function detectLoop() {
         const maxBoxes = parseInt(maxPosesEl.value) || 3;
         const minScore = parseFloat(minScoreEl.value) || 0.3;
 
-        // ★★★ 核心优化：先把视频帧画到低分辨率离屏 canvas，再交给模型
         const vw = video.videoWidth, vh = video.videoHeight;
         let iw = Math.min(vw, MAX_INFER_W);
         iw = Math.max(iw, MIN_INFER_W);
@@ -797,6 +809,41 @@ function renderLoop() {
     aimInitialized = false;
   }
 
+  // ★★★ 到位锁定（迟滞）判断：用目标原始位置与屏幕中心的几何距离
+  if (hasTarget) {
+    const distToAim = Math.hypot(targetAimX - screenCx, targetAimY - screenCy);
+    if (lockedAtTarget) {
+      // 已锁定：只有偏差超过 LEAVE_RADIUS 才解锁
+      if (distToAim > LEAVE_RADIUS) {
+        lockedAtTarget = false;
+        arrivedFrames = 0;
+      }
+    } else {
+      // 未锁定：连续多帧进入 ARRIVE_RADIUS 才锁定
+      if (distToAim < ARRIVE_RADIUS) {
+        arrivedFrames++;
+        if (arrivedFrames >= ARRIVE_FRAMES) lockedAtTarget = true;
+      } else {
+        arrivedFrames = 0;
+      }
+    }
+  } else {
+    lockedAtTarget = false;
+    arrivedFrames = 0;
+  }
+
+  // 更新到位状态徽章
+  if (lockedAtTarget) {
+    arriveBadge.textContent = '已到位锁死';
+    arriveBadge.className = 'lock-badge arrive';
+  } else if (hasTarget && arrivedFrames > 0) {
+    arriveBadge.textContent = '接近中 ' + arrivedFrames + '/' + ARRIVE_FRAMES;
+    arriveBadge.className = 'lock-badge waiting';
+  } else {
+    arriveBadge.textContent = '未到位';
+    arriveBadge.className = 'lock-badge off';
+  }
+
   if (hasTarget) {
     const dt = (now - lastAimTime) / 1000;
     if (lastAimTime > 0 && dt > 0.001 && dt < 1) {
@@ -811,7 +858,7 @@ function renderLoop() {
   }
 
   let adaptiveGain = MOVE_GAIN;
-  if (hasTarget) {
+  if (hasTarget && !lockedAtTarget) {
     if (MOVE_GAIN < 0.30) {
       if (targetSpeed < STILL_THRESHOLD) adaptiveGain = MOVE_GAIN * STILL_DAMPING;
       else if (targetSpeed > STILL_THRESHOLD * 3) adaptiveGain = MOVE_GAIN * MOVING_BOOST;
@@ -827,7 +874,8 @@ function renderLoop() {
   }
 
   let sendDx = 0, sendDy = 0;
-  if (hasTarget) {
+  // ★★★ 到位锁定时直接输出 0，不再微调，像锁死一样
+  if (hasTarget && !lockedAtTarget) {
     if (Math.abs(dx) >= DEAD_ZONE) {
       sendDx = dx * adaptiveGain;
       if (Math.abs(sendDx) < MIN_SEND) sendDx = (dx > 0 ? MIN_SEND : -MIN_SEND);
@@ -839,6 +887,7 @@ function renderLoop() {
     sendDx = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, sendDx));
     sendDy = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, sendDy));
   }
+  // 到位锁定 → sendDx = sendDy = 0
 
   dxEl.textContent = Math.round(sendDx);
   dyEl.textContent = Math.round(sendDy);
@@ -1002,6 +1051,7 @@ async function startAll() {
     }
 
     lockedBox = null; lockedMissFrames = 0; lockAge = 0;
+    arrivedFrames = 0; lockedAtTarget = false;
     latestPersons = []; latestPersonsTime = 0; lastDrawnTime = 0;
     smoothAimX = 0; smoothAimY = 0; aimInitialized = false;
     lastAimX = 0; lastAimY = 0; lastAimTime = 0; targetSpeed = 0;
@@ -1029,15 +1079,19 @@ function stopAll() {
   fpsEl.textContent = '0'; videoFpsEl.textContent = '0'; inferFpsEl.textContent = '0';
   dxEl.textContent = '0'; dyEl.textContent = '0';
   latestPersons = []; lockedBox = null; lockedMissFrames = 0; lockAge = 0;
+  arrivedFrames = 0; lockedAtTarget = false;
   aimInitialized = false; targetSpeed = 0;
   vstatusEl.textContent = '已停止'; vstatusEl.style.color = '#ffb74d';
+  arriveBadge.textContent = '未到位'; arriveBadge.className = 'lock-badge off';
 
   if (tfReady()) setTimeout(() => prewarmModel(), 500);
 }
 
 function resetLock() {
   lockedBox = null; lockedMissFrames = 0; lockAge = 0;
+  arrivedFrames = 0; lockedAtTarget = false;
   lockBadge.textContent = '未锁定'; lockBadge.className = 'lock-badge off';
+  arriveBadge.textContent = '未到位'; arriveBadge.className = 'lock-badge off';
 }
 
 async function reopenCamera() {
