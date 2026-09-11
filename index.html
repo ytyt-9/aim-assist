@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v19 COCO-SSD</title>
+<title>视觉跟随 · v20</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -71,7 +71,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v19 COCO-SSD</h1>
+<h1>视觉跟随 · v20</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -93,6 +93,31 @@
   <div class="row">
     <label>状态</label>
     <span class="status" id="wsStatus">未连接</span>
+  </div>
+
+  <div class="sec-title">★ 光标跟随速度（关键）</div>
+  <div class="row">
+    <label>速度</label>
+    <select id="moveSpeed">
+      <option value="0.03">很慢（0.03）</option>
+      <option value="0.05" selected>慢（0.05，推荐先试）</option>
+      <option value="0.08">中（0.08）</option>
+      <option value="0.12">快（0.12）</option>
+      <option value="0.20">很快（0.20）</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>死区</label>
+    <select id="deadZone">
+      <option value="0">0 px</option>
+      <option value="3" selected>3 px（推荐）</option>
+      <option value="5">5 px</option>
+      <option value="8">8 px</option>
+      <option value="12">12 px（很稳）</option>
+    </select>
+  </div>
+  <div class="row" style="font-size:0.65rem;color:#9bc4e2;line-height:1.3;">
+    光标乱动 → 速度调低 / 死区调大；光标跟不上 → 速度调高
   </div>
 
   <div class="sec-title">检测设置</div>
@@ -118,7 +143,7 @@
   <div class="row">
     <label>置信度</label>
     <select id="minScore">
-      <option value="0.2">0.2（宽松，多识别）</option>
+      <option value="0.2">0.2（宽松）</option>
       <option value="0.3" selected>0.3（推荐）</option>
       <option value="0.4">0.4（较严）</option>
       <option value="0.5">0.5（很严）</option>
@@ -130,7 +155,6 @@
       <option value="3" selected>3</option>
       <option value="5">5</option>
       <option value="10">10</option>
-      <option value="20">20</option>
     </select>
   </div>
   <div class="row">
@@ -140,8 +164,7 @@
       <option value="6">6 Hz</option>
       <option value="8" selected>8 Hz（推荐）</option>
       <option value="10">10 Hz</option>
-      <option value="15">15 Hz（灵敏）</option>
-      <option value="20">20 Hz</option>
+      <option value="15">15 Hz</option>
     </select>
   </div>
 
@@ -198,7 +221,7 @@
   <div class="stat" style="margin-top:4px;">
     <span>dx: <b id="dx">0</b></span>
     <span>dy: <b id="dy">0</b></span>
-    <span>锁定: <b id="lockedId">-</b></span>
+    <span>置信度: <b id="lockedId">-</b></span>
   </div>
 
   <div class="perf">
@@ -219,7 +242,7 @@
 
 <script>
 // ============================================================
-// 库加载器（TF.js + COCO-SSD）
+// 库加载器
 // ============================================================
 const LIB_CDNS = [
   { name: 'jsdelivr',
@@ -287,10 +310,14 @@ const WS_PORT = 81;
 const SEND_HZ = 30;
 let   INFER_HZ = 8;
 
-const SMOOTH_ALPHA = 0.55;
+// ★ 核心参数：光标跟随速度
+const SMOOTH_ALPHA = 0.75;      // 高平滑（0.75 = 75% 保留旧值，减少抖动）
+const MAX_MOVE_PER_FRAME = 40;  // 单帧最大移动 40px
+let   MOVE_GAIN = 0.05;         // 速度系数（每帧发送 = dx × gain）
+let   DEAD_ZONE = 3;            // 死区（小于此值不发）
+
 const LOCK_TIMEOUT_FRAMES = 20;
 
-// 目标选择模式
 const MODE_LOCKED    = 'locked';
 const MODE_CROSSHAIR = 'crosshair';
 const MODE_LOWEST    = 'lowest';
@@ -315,15 +342,14 @@ let videoFpsCount = 0;
 let videoFpsTimer = 0;
 let videoFpsRunning = false;
 
-// 锁定状态（COCO-SSD 无 trackId，用位置跟踪）
-let lockedBox = null;   // {cx, cy, w, h}
+let lockedBox = null;
 let lockedMissFrames = 0;
 let lockAge = 0;
 
 let roiEnabled = true;
 let roiPercent = 60;
 
-let latestPersons = [];      // 检测到的"人"数组
+let latestPersons = [];
 let latestPersonsTime = 0;
 let lastDrawnTime = 0;
 
@@ -365,6 +391,8 @@ const maxPosesEl = document.getElementById('maxPoses');
 const inferHzEl = document.getElementById('inferHz');
 const camResEl = document.getElementById('camRes');
 const camFacingEl = document.getElementById('camFacing');
+const moveSpeedEl = document.getElementById('moveSpeed');
+const deadZoneEl = document.getElementById('deadZone');
 const roiEnabledEl = document.getElementById('roiEnabled');
 const roiPercentEl = document.getElementById('roiPercent');
 const roiPercentValEl = document.getElementById('roiPercentVal');
@@ -389,15 +417,11 @@ function setLibStatus(msg, cls) { libStatusEl.textContent = msg; libStatusEl.cla
 
 function updateMirror() {
   mirrored = (actualFacing === 'user');
-  if (mirrored) {
-    videoWrap.classList.add('flip');
-  } else {
-    videoWrap.classList.remove('flip');
-  }
+  if (mirrored) videoWrap.classList.add('flip');
+  else videoWrap.classList.remove('flip');
   console.log('[Mirror]', mirrored ? 'ON (前置)' : 'OFF (后置/未知)');
 }
 
-// 镜像时画文字：把文字坐标反一下
 function drawText(text, visualX, visualY) {
   if (mirrored) {
     const cx = overlay.width - visualX;
@@ -442,15 +466,10 @@ function sendAim(dx, dy, hasTarget) {
 // ============================================================
 // 预热模型
 // ============================================================
-function getConfigKey() {
-  // COCO-SSD 主要是 lite_mobilenet_v2 一种模型
-  return 'coco-ssd-lite';
-}
-
 async function prewarmModel() {
   if (!tfReady()) return;
 
-  const key = getConfigKey();
+  const key = 'coco-ssd-lite';
   if (prewarmedDetector && prewarmKey === key) return;
   if (prewarmPromise && prewarmKey === key) {
     try { await prewarmPromise; } catch (e) {}
@@ -525,7 +544,6 @@ async function startCamera() {
   let stream = null;
 
   for (const c of candidates) {
-    console.log('[Camera] 尝试 ' + c.label + ' · ' + facing);
     const constraints = {
       facingMode: { ideal: facing },
       width: { ideal: c.w },
@@ -535,11 +553,11 @@ async function startCamera() {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
       const settings = stream.getVideoTracks()[0].getSettings();
-      console.log('[Camera] ✅ ' + c.label + ' OK -> 实际 ' + settings.width + '×' + settings.height + ' @ ' + settings.frameRate + 'fps');
+      console.log('[Camera] ✅ ' + c.label + ' -> ' + settings.width + '×' + settings.height);
       actualFacing = settings.facingMode || '';
       break;
     } catch (e) {
-      console.warn('[Camera] ' + c.label + ' FAIL: ' + e.name + ' / ' + e.message);
+      console.warn('[Camera] ' + c.label + ' FAIL: ' + e.name);
       stream = null;
     }
   }
@@ -640,8 +658,6 @@ function startVideoFpsMonitor() {
 // ============================================================
 // bbox 工具
 // ============================================================
-// COCO-SSD 输出: { bbox: [x, y, w, h], class, score }
-// 转成内部格式: { x1, y1, x2, y2, cx, cy, w, h, score }
 function convertDetection(d) {
   const [bx, by, bw, bh] = d.bbox;
   return {
@@ -653,17 +669,9 @@ function convertDetection(d) {
   };
 }
 
-// 计算瞄准点（用 bbox 比例估算）
 function getAimPoint(box, part) {
-  if (part === 'head') {
-    // 框上部 15%
-    return { x: box.cx, y: box.y1 + box.h * 0.15 };
-  }
-  if (part === 'leg') {
-    // 框下部 80%
-    return { x: box.cx, y: box.y1 + box.h * 0.80 };
-  }
-  // body = 框中心
+  if (part === 'head') return { x: box.cx, y: box.y1 + box.h * 0.15 };
+  if (part === 'leg')  return { x: box.cx, y: box.y1 + box.h * 0.80 };
   return { x: box.cx, y: box.cy };
 }
 
@@ -675,7 +683,7 @@ function computeScore(c, screenCx, screenCy) {
   const lowScore = Math.min(c.y2 / (screenCy * 2), 1);
   const maxArea = screenCx * screenCy * 0.5;
   const sizeScore = Math.min(Math.sqrt(c.w * c.h) / Math.sqrt(maxArea), 1);
-  const confScore = c.score;   // 检测置信度
+  const confScore = c.score;
   return {
     score: distScore * 0.45 + lowScore * 0.20 + sizeScore * 0.20 + confScore * 0.15,
     distToCross
@@ -693,12 +701,12 @@ function inROI(point, roi) {
 function selectTarget(candidates, mode, screenCx, screenCy, roi) {
   const part = aimPartEl.value;
 
-  // ---- 锁定模式 ----
+  // ---- 锁定模式：和 lockedBox 最近匹配 ----
   if (mode === MODE_LOCKED && lockedBox !== null) {
-    // 找和 lockedBox 最接近的候选
     let best = null;
     let bestDist = Infinity;
-    const maxDist = Math.max(lockedBox.w, lockedBox.h) * 1.5;   // 允许移动的最大距离
+    // ★ 收紧匹配阈值：0.8 倍框大小（防止误锁到旁边的人）
+    const maxDist = Math.max(lockedBox.w, lockedBox.h) * 0.8;
     for (const c of candidates) {
       const d = Math.hypot(c.cx - lockedBox.cx, c.cy - lockedBox.cy);
       if (d < maxDist && d < bestDist) {
@@ -707,8 +715,13 @@ function selectTarget(candidates, mode, screenCx, screenCy, roi) {
       }
     }
     if (best) {
-      // 更新锁定框位置
-      lockedBox = { cx: best.cx, cy: best.cy, w: best.w, h: best.h };
+      // 平滑更新锁定框位置（避免位置跳变）
+      lockedBox = {
+        cx: lockedBox.cx * 0.5 + best.cx * 0.5,
+        cy: lockedBox.cy * 0.5 + best.cy * 0.5,
+        w: lockedBox.w * 0.5 + best.w * 0.5,
+        h: lockedBox.h * 0.5 + best.h * 0.5
+      };
       lockedMissFrames = 0;
       lockAge++;
       return { target: best, lockState: 'active' };
@@ -721,21 +734,18 @@ function selectTarget(candidates, mode, screenCx, screenCy, roi) {
     }
   }
 
-  // ---- 按 ROI 过滤 ----
   const eligible = roiEnabled
     ? candidates.filter(c => inROI(getAimPoint(c, part), roi))
     : candidates.slice();
 
   if (eligible.length === 0) return { target: null, lockState: 'off' };
 
-  // ---- 打分 ----
   for (const c of eligible) {
     const s = computeScore(c, screenCx, screenCy);
     c.score = s.score;
     c.distToCross = s.distToCross;
   }
 
-  // ---- 排序 ----
   let selected;
   switch (mode) {
     case MODE_CROSSHAIR:
@@ -759,7 +769,6 @@ function selectTarget(candidates, mode, screenCx, screenCy, roi) {
 
   if (!selected) return { target: null, lockState: 'off' };
 
-  // ---- 锁定模式：记录新目标 ----
   if (mode === MODE_LOCKED) {
     lockedBox = { cx: selected.cx, cy: selected.cy, w: selected.w, h: selected.h };
     lockedMissFrames = 0;
@@ -783,7 +792,6 @@ async function detectLoop() {
 
         const predictions = await detector.detect(video, maxBoxes, minScore);
 
-        // 只保留 person 类
         const persons = predictions
           .filter(p => p.class === 'person' && p.score >= minScore)
           .map(convertDetection);
@@ -843,16 +851,39 @@ function renderLoop() {
     lockedIdEl.textContent = lockedBox !== null ? '锁定中' : '-';
   }
 
+  // ★ 平滑
   if (hasTarget) {
     smoothDx = smoothDx * SMOOTH_ALPHA + dx * (1 - SMOOTH_ALPHA);
     smoothDy = smoothDy * SMOOTH_ALPHA + dy * (1 - SMOOTH_ALPHA);
-  } else { smoothDx = 0; smoothDy = 0; }
+  } else {
+    smoothDx = 0;
+    smoothDy = 0;
+  }
 
-  dxEl.textContent = Math.round(smoothDx);
-  dyEl.textContent = Math.round(smoothDy);
+  // ★★★ 关键修复：缩放 + 死区 + 饱和 ★★★
+  let sendDx = 0, sendDy = 0;
+  if (hasTarget) {
+    // 1. 缩放：每帧只发送 dx × gain
+    sendDx = smoothDx * MOVE_GAIN;
+    sendDy = smoothDy * MOVE_GAIN;
+
+    // 2. 死区：偏移小于阈值 → 不动
+    if (Math.abs(smoothDx) < DEAD_ZONE) sendDx = 0;
+    if (Math.abs(smoothDy) < DEAD_ZONE) sendDy = 0;
+
+    // 3. 饱和：单帧最多 MAX_MOVE_PER_FRAME 像素
+    sendDx = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, sendDx));
+    sendDy = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, sendDy));
+  }
+
+  dxEl.textContent = Math.round(sendDx);
+  dyEl.textContent = Math.round(sendDy);
 
   const interval = 1000 / SEND_HZ;
-  if (now - lastSendTime >= interval) { lastSendTime = now; sendAim(smoothDx, smoothDy, hasTarget); }
+  if (now - lastSendTime >= interval) {
+    lastSendTime = now;
+    sendAim(sendDx, sendDy, hasTarget);
+  }
 
   fpsCount++;
   if (now - fpsTimer >= 1000) {
@@ -869,10 +900,10 @@ function renderLoop() {
     if (video.videoWidth === 0) diag = '⚠ 摄像头没有画面。请点"重开"按钮。';
     else if (backend === '?') diag = '⏳ TF 库还在加载中，请稍等...';
     else if (backend !== 'webgl' && backend !== 'webgpu') diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）';
-    else if (vidFps > 0 && vidFps < 15) diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 请切"前置"或换更低分辨率';
-    else if (fps < 30) diag = '⚠ rAF 只有 ' + fps + ' fps —— 把推理频率降到 6Hz';
-    else if (infFps < 3 && INFER_HZ >= 8) diag = '⚠ 推理只跑了 ' + infFps + ' Hz（目标 ' + INFER_HZ + '）';
-    else if (latestPersons.length === 0) diag = '⚠ 当前没检测到"人"。若游戏人物画得很小/卡通，COCO-SSD 可能识别不出来，可试试：① 手机靠近屏幕 ② 置信度降到 0.2';
+    else if (vidFps > 0 && vidFps < 15) diag = '⚠ 摄像头只有 ' + vidFps + ' fps';
+    else if (fps < 30) diag = '⚠ rAF 只有 ' + fps + ' fps';
+    else if (infFps < 3 && INFER_HZ >= 8) diag = '⚠ 推理只跑了 ' + infFps + ' Hz';
+    else if (latestPersons.length === 0) diag = '⚠ 当前没检测到"人"。试试：① 靠近屏幕 ② 置信度降到 0.2';
 
     if (diag) { warnBox.textContent = diag; warnBox.className = 'warn-box show err'; }
     else { warnBox.className = 'warn-box'; }
@@ -895,7 +926,6 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
   const persons = latestPersons;
   personCountEl.textContent = persons.length;
 
-  // 所有候选框（灰白虚线）
   ctx.strokeStyle = 'rgba(255,255,255,0.35)';
   ctx.lineWidth = 1;
   ctx.setLineDash([3, 3]);
@@ -904,7 +934,6 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
   }
   ctx.setLineDash([]);
 
-  // ROI 遮罩
   if (roiEnabled) {
     ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
     ctx.fillRect(0, 0, cw, roi.y1);
@@ -913,7 +942,6 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.fillRect(roi.x2, roi.y1, cw - roi.x2, roiH);
   }
 
-  // ROI 红框
   if (roiEnabled) {
     ctx.strokeStyle = 'rgba(255,82,82,0.85)';
     ctx.lineWidth = 2;
@@ -925,12 +953,10 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     drawText('ROI ' + roiPercent + '%', roi.x1 + 4, roi.y1 + 11);
   }
 
-  // 选目标
   const mode = targetModeEl.value;
   const result = selectTarget(persons, mode, screenCx, screenCy, roi);
   const target = result.target;
 
-  // ROI 内人数
   let roiCount = 0;
   for (const p of persons) {
     if (!roiEnabled || inROI(getAimPoint(p, part), roi)) roiCount++;
@@ -938,13 +964,11 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
   roiCountEl.textContent = roiCount;
 
   if (target) {
-    // 黄框
     ctx.strokeStyle = '#ffd54f';
     ctx.lineWidth = 2;
     ctx.setLineDash([]);
     ctx.strokeRect(target.x1, target.y1, target.w, target.h);
 
-    // 瞄准点（绿点）
     const aim = getAimPoint(target, part);
     ctx.fillStyle = '#7cff7c';
     ctx.beginPath();
@@ -954,7 +978,6 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    // 到准星的虚线
     ctx.strokeStyle = 'rgba(255,213,79,0.55)';
     ctx.lineWidth = 1.5;
     ctx.setLineDash([4, 4]);
@@ -964,7 +987,6 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // 标签：置信度百分比
     ctx.fillStyle = '#ffd54f';
     ctx.font = 'bold 11px monospace';
     const label = Math.round(target.score * 100) + '%';
@@ -1005,7 +1027,7 @@ async function startAll() {
     try {
       const ok = await window.libsPromise;
       if (!ok || !tfReady()) {
-        showError('TensorFlow.js / COCO-SSD 库加载失败。请检查网络，刷新页面后重试。');
+        showError('库加载失败。请检查网络，刷新页面后重试。');
         btnStart.disabled = false; btnStart.textContent = '启动';
         return;
       }
@@ -1019,8 +1041,7 @@ async function startAll() {
   hideWarn();
 
   try {
-    const key = getConfigKey();
-    if (prewarmedDetector && prewarmKey === key) {
+    if (prewarmedDetector && prewarmKey === 'coco-ssd-lite') {
       if (detector) { try { detector.dispose(); } catch (e) {} }
       detector = prewarmedDetector;
       prewarmedDetector = null;
@@ -1036,6 +1057,8 @@ async function startAll() {
     }
 
     INFER_HZ = parseInt(inferHzEl.value) || 8;
+    MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.05;
+    DEAD_ZONE = parseFloat(deadZoneEl.value) || 3;
 
     if (!videoStream) {
       try { await startCamera(); }
@@ -1044,6 +1067,7 @@ async function startAll() {
 
     lockedBox = null; lockedMissFrames = 0; lockAge = 0;
     latestPersons = []; latestPersonsTime = 0; lastDrawnTime = 0;
+    smoothDx = 0; smoothDy = 0;
     inferCount = 0; inferTimer = performance.now();
     fpsCount = 0; fpsTimer = performance.now();
 
@@ -1067,7 +1091,9 @@ function stopAll() {
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   personCountEl.textContent = '0'; roiCountEl.textContent = '0';
   fpsEl.textContent = '0'; videoFpsEl.textContent = '0'; inferFpsEl.textContent = '0';
+  dxEl.textContent = '0'; dyEl.textContent = '0';
   latestPersons = []; lockedBox = null; lockedMissFrames = 0; lockAge = 0;
+  smoothDx = 0; smoothDy = 0;
   vstatusEl.textContent = '已停止'; vstatusEl.style.color = '#ffb74d';
 
   if (tfReady()) {
@@ -1104,6 +1130,25 @@ btnStop.addEventListener('click', stopAll);
 btnResetLock.addEventListener('click', resetLock);
 btnReopen.addEventListener('click', reopenCamera);
 
+// ★ 速度调节立即生效
+moveSpeedEl.addEventListener('change', () => {
+  MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.05;
+  if (running) {
+    showInfo('光标跟随速度已改为 ' + MOVE_GAIN + '（立即生效）');
+    setTimeout(hideWarn, 2000);
+  }
+  localStorage.setItem('pref_moveSpeed', moveSpeedEl.value);
+});
+
+deadZoneEl.addEventListener('change', () => {
+  DEAD_ZONE = parseFloat(deadZoneEl.value) || 3;
+  if (running) {
+    showInfo('死区已改为 ' + DEAD_ZONE + ' px（立即生效）');
+    setTimeout(hideWarn, 2000);
+  }
+  localStorage.setItem('pref_deadZone', deadZoneEl.value);
+});
+
 roiEnabledEl.addEventListener('change', () => { roiEnabled = roiEnabledEl.checked; updateRoiInfo(); });
 roiPercentEl.addEventListener('input', () => {
   roiPercent = parseInt(roiPercentEl.value);
@@ -1133,7 +1178,7 @@ const savedIp = localStorage.getItem('espIp');
 if (savedIp) espIpEl.value = savedIp;
 espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.value));
 
-['aimPart', 'targetMode', 'inferHz', 'minScore', 'maxPoses'].forEach(id => {
+['aimPart', 'targetMode', 'inferHz', 'minScore', 'maxPoses', 'moveSpeed', 'deadZone'].forEach(id => {
   const el = document.getElementById(id);
   const saved = localStorage.getItem('pref_' + id);
   if (saved !== null && el) el.value = saved;
@@ -1156,6 +1201,8 @@ camFacingEl.value = 'user';
 roiEnabled = roiEnabledEl.checked;
 roiPercent = parseInt(roiPercentEl.value);
 INFER_HZ = parseInt(inferHzEl.value) || 8;
+MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.05;
+DEAD_ZONE = parseFloat(deadZoneEl.value) || 3;
 roiPercentValEl.textContent = roiPercent + '%';
 updateRoiInfo();
 </script>
