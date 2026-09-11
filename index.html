@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · 流畅版</title>
+<title>视觉跟随 · 流畅版 v2</title>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
 <style>
@@ -16,7 +16,7 @@
   .crosshair { position: absolute; top: 50%; left: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; z-index: 3; }
   .crosshair::before, .crosshair::after { content: ''; position: absolute; background: #ffd54f; box-shadow: 0 0 3px #000; }
   .crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
-  .crosshair::after { top: 10px; left: 0; width: 22px; height: 2px; }
+  .crosshair::after { top: 10px; left: 0; width: 2px; height: 2px; height: 22px; }
   .panel { width: 100%; max-width: 480px; margin-top: 8px; background: #16213e; border-radius: 6px; padding: 8px; }
   .row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 0.82rem; flex-wrap: wrap; }
   .row label { flex: 0 0 auto; color: #9bc4e2; font-size: 0.75rem; min-width: 58px; }
@@ -56,7 +56,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · MultiPose + ROI + 流畅版</h1>
+<h1>视觉跟随 · 流畅版 v2</h1>
 
 <div class="video-wrap">
   <video id="video" autoplay playsinline muted></video>
@@ -105,11 +105,22 @@
   <div class="row">
     <label>推理频率</label>
     <select id="inferHz">
-      <option value="6">6 Hz（最流畅，反应慢）</option>
-      <option value="10">10 Hz（流畅）</option>
-      <option value="12" selected>12 Hz（推荐平衡）</option>
+      <option value="4">4 Hz（最流畅）</option>
+      <option value="6">6 Hz（很流畅）</option>
+      <option value="8" selected>8 Hz（推荐）</option>
+      <option value="10">10 Hz</option>
       <option value="15">15 Hz（反应快）</option>
-      <option value="20">20 Hz（最灵敏，可能卡）</option>
+      <option value="20">20 Hz（可能卡）</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>画面分辨率</label>
+    <select id="canvasSize">
+      <option value="320">320×180（最流畅）</option>
+      <option value="480">480×270（流畅）</option>
+      <option value="640" selected>640×360（推荐平衡）</option>
+      <option value="960">960×540（清晰）</option>
+      <option value="1280">1280×720（最清晰，可能卡）</option>
     </select>
   </div>
 
@@ -175,10 +186,9 @@
     <span>锁定帧: <b id="lockAge">0</b></span>
   </div>
 
-  <!-- ★ 新增：性能监测 -->
   <div class="perf">
-    <span>推理频率: <b id="inferFps">0</b> Hz</span>
-    <span>摄像头: <b id="camRes">-</b></span>
+    <span>推理: <b id="inferFps">0</b> Hz</span>
+    <span>画布: <b id="canvasInfo">-</b></span>
   </div>
 
   <div class="warn-box" id="warnBox"></div>
@@ -187,8 +197,10 @@
 <script>
 // ============ 配置 ============
 const WS_PORT = 81;
-const SEND_HZ = 30;              // 发送频率（每秒）
-let   INFER_HZ = 12;             // ★ 推理频率（可调），越低画面越流畅
+const SEND_HZ = 30;
+let   INFER_HZ = 8;
+let   CANVAS_HEIGHT = 360;         // canvas 内部高度，宽度 = 高度 * 16/9
+
 const KP_SCORE_MIN = 0.30;
 const SMOOTH_ALPHA = 0.55;
 const LOCK_TIMEOUT_FRAMES = 20;
@@ -201,35 +213,30 @@ let detector = null;
 let running = false;
 let lastSendTime = 0;
 let sentCount = 0;
-
-// 渲染 FPS
 let fpsCount = 0;
 let fpsTimer = 0;
-
-// 推理 FPS
 let inferCount = 0;
 let inferTimer = 0;
-
-// 平滑
 let smoothDx = 0, smoothDy = 0;
 
-// 锁定
 let lockedTrackId = null;
 let lockedMissFrames = 0;
 let lockAge = 0;
 
-// ROI
 let roiEnabled = true;
 let roiPercent = 60;
 
-// ★ 共享的推理结果
 let latestPoses = [];
 let latestPosesTime = 0;
+let lastDrawnPosesTime = 0;
+
+// 坐标缩放（video 坐标 → canvas 坐标）
+let scaleX = 1, scaleY = 1;
 
 // ============ DOM ============
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
-const ctx = overlay.getContext('2d');
+const ctx = overlay.getContext('2d', { alpha: true, desynchronized: true });
 const espIpEl = document.getElementById('espIp');
 const wsStatusEl = document.getElementById('wsStatus');
 const personCountEl = document.getElementById('personCount');
@@ -252,13 +259,14 @@ const modelTypeEl = document.getElementById('modelType');
 const inputSizeEl = document.getElementById('inputSize');
 const maxPosesEl = document.getElementById('maxPoses');
 const inferHzEl = document.getElementById('inferHz');
+const canvasSizeEl = document.getElementById('canvasSize');
 const roiEnabledEl = document.getElementById('roiEnabled');
 const roiPercentEl = document.getElementById('roiPercent');
 const roiPercentValEl = document.getElementById('roiPercentVal');
 const roiInfoEl = document.getElementById('roiInfo');
 const warnBox = document.getElementById('warnBox');
 const inferFpsEl = document.getElementById('inferFps');
-const camResEl = document.getElementById('camRes');
+const canvasInfoEl = document.getElementById('canvasInfo');
 
 // ============ WebSocket ============
 function connectWs() {
@@ -311,14 +319,29 @@ async function startCamera() {
   video.srcObject = videoStream;
   await video.play();
 
-  // canvas 分辨率跟 video 一致
-  overlay.width  = video.videoWidth  || 1280;
-  overlay.height = video.videoHeight || 720;
+  // ★ 关键优化：canvas 内部分辨率独立于视频分辨率
+  // 视频用高清（浏览器原生流畅显示），canvas 用小尺寸（覆盖层，视觉不损失）
+  applyCanvasSize();
 
-  camResEl.textContent = video.videoWidth + '×' + video.videoHeight;
+  // 坐标缩放因子
+  scaleX = overlay.width  / video.videoWidth;
+  scaleY = overlay.height / video.videoHeight;
+
+  canvasInfoEl.textContent = overlay.width + '×' + overlay.height + ' (video ' + video.videoWidth + '×' + video.videoHeight + ')';
 }
 
-// ============ 关键点工具 ============
+function applyCanvasSize() {
+  const h = CANVAS_HEIGHT;
+  const w = Math.round(h * 16 / 9);
+  overlay.width = w;
+  overlay.height = h;
+  if (video.videoWidth) {
+    scaleX = overlay.width  / video.videoWidth;
+    scaleY = overlay.height / video.videoHeight;
+  }
+}
+
+// ============ 关键点工具（输入 canvas 坐标）============
 function kpMap(keypoints) {
   const m = {};
   keypoints.forEach(k => { m[k.name] = k; });
@@ -331,30 +354,32 @@ function avg(points) {
   return { x, y };
 }
 
-function getAimPoint(keypoints, part) {
-  const kp = kpMap(keypoints);
+// ★ 坐标已按 scaleX/scaleY 缩放到 canvas 坐标
+function getAimPoint(kps, part) {
+  const kp = kpMap(kps);
   if (part === 'head') {
-    if (ok(kp.nose)) return { x: kp.nose.x, y: kp.nose.y };
+    if (ok(kp.nose)) return { x: kp.nose.x * scaleX, y: kp.nose.y * scaleY };
     const eyes = [kp.left_eye, kp.right_eye].filter(ok);
-    if (eyes.length > 0) return avg(eyes);
+    if (eyes.length > 0) { const a = avg(eyes); return { x: a.x * scaleX, y: a.y * scaleY }; }
     const ears = [kp.left_ear, kp.right_ear].filter(ok);
-    if (ears.length > 0) return avg(ears);
+    if (ears.length > 0) { const a = avg(ears); return { x: a.x * scaleX, y: a.y * scaleY }; }
     const sh = [kp.left_shoulder, kp.right_shoulder].filter(ok);
-    if (sh.length > 0) { const a = avg(sh); return { x: a.x, y: a.y - 40 }; }
+    if (sh.length > 0) { const a = avg(sh); return { x: a.x * scaleX, y: a.y * scaleY - 20 }; }
     return null;
   }
   if (part === 'body') {
     const ls = kp.left_shoulder, rs = kp.right_shoulder;
     const lh = kp.left_hip,      rh = kp.right_hip;
     if (ok(ls) && ok(rs) && ok(lh) && ok(rh)) {
-      return { x: (ls.x + rs.x + lh.x + rh.x) / 4, y: (ls.y + rs.y + lh.y + rh.y) / 4 };
+      return { x: (ls.x + rs.x + lh.x + rh.x) / 4 * scaleX,
+               y: (ls.y + rs.y + lh.y + rh.y) / 4 * scaleY };
     }
     const sh = [ls, rs].filter(ok);
-    if (sh.length === 2) return avg(sh);
+    if (sh.length === 2) { const a = avg(sh); return { x: a.x * scaleX, y: a.y * scaleY }; }
     const hp = [lh, rh].filter(ok);
-    if (hp.length === 2) return avg(hp);
-    const headPt = getAimPoint(keypoints, 'head');
-    if (headPt) return { x: headPt.x, y: headPt.y + 60 };
+    if (hp.length === 2) { const a = avg(hp); return { x: a.x * scaleX, y: a.y * scaleY }; }
+    const headPt = getAimPoint(kps, 'head');
+    if (headPt) return { x: headPt.x, y: headPt.y + 30 };
     return null;
   }
   if (part === 'leg') {
@@ -363,26 +388,28 @@ function getAimPoint(keypoints, part) {
     const knees = [lk, rk].filter(ok);
     const ankles = [la, ra].filter(ok);
     if (knees.length === 2 && ankles.length === 2) {
-      return { x: (lk.x + rk.x + la.x + ra.x) / 4, y: (lk.y + rk.y + la.y + ra.y) / 4 };
+      return { x: (lk.x + rk.x + la.x + ra.x) / 4 * scaleX,
+               y: (lk.y + rk.y + la.y + ra.y) / 4 * scaleY };
     }
-    if (knees.length > 0) return avg(knees);
-    if (ankles.length > 0) return avg(ankles);
+    if (knees.length > 0) { const a = avg(knees); return { x: a.x * scaleX, y: a.y * scaleY }; }
+    if (ankles.length > 0) { const a = avg(ankles); return { x: a.x * scaleX, y: a.y * scaleY }; }
     const hp = [kp.left_hip, kp.right_hip].filter(ok);
-    if (hp.length === 2) { const a = avg(hp); return { x: a.x, y: a.y + 80 }; }
+    if (hp.length === 2) { const a = avg(hp); return { x: a.x * scaleX, y: a.y * scaleY + 40 }; }
     return null;
   }
   return null;
 }
 
-function getBBox(keypoints) {
-  const valid = keypoints.filter(ok);
+function getBBox(kps) {
+  const valid = kps.filter(ok);
   if (valid.length < 3) return null;
   let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
   for (const k of valid) {
-    if (k.x < x1) x1 = k.x;
-    if (k.y < y1) y1 = k.y;
-    if (k.x > x2) x2 = k.x;
-    if (k.y > y2) y2 = k.y;
+    const x = k.x * scaleX, y = k.y * scaleY;
+    if (x < x1) x1 = x;
+    if (y < y1) y1 = y;
+    if (x > x2) x2 = x;
+    if (y > y2) y2 = y;
   }
   return { x1, y1, x2, y2, w: x2 - x1, h: y2 - y1 };
 }
@@ -395,8 +422,7 @@ function computeScore(c, screenCx, screenCy) {
   const maxArea = screenCx * screenCy * 0.5;
   const sizeScore = Math.min(Math.sqrt(c.bbox.w * c.bbox.h) / Math.sqrt(maxArea), 1);
   const kpScore = Math.min(c.validKpCount / 12, 1);
-  const score = distScore * 0.50 + lowScore * 0.20 + sizeScore * 0.20 + kpScore * 0.10;
-  return { score };
+  return { score: distScore * 0.50 + lowScore * 0.20 + sizeScore * 0.20 + kpScore * 0.10 };
 }
 
 function inROI(point, roi) {
@@ -437,11 +463,10 @@ function selectTarget(candidates, mode, screenCx, screenCy, roi) {
   return { target: selected, lockState: 'off' };
 }
 
-// ============ ★ 推理循环（独立，不影响画面）============
+// ============ 推理循环（独立）============
 async function detectLoop() {
   while (running) {
     const t0 = performance.now();
-
     try {
       const poses = await detector.estimatePoses(video, {
         maxPoses: parseInt(maxPosesEl.value),
@@ -450,11 +475,8 @@ async function detectLoop() {
       latestPoses = poses;
       latestPosesTime = performance.now();
       inferCount++;
-    } catch (e) {
-      // 忽略偶发错误
-    }
+    } catch (e) {}
 
-    // 推理 FPS 统计
     const now = performance.now();
     if (now - inferTimer >= 1000) {
       inferFpsEl.textContent = inferCount;
@@ -462,7 +484,6 @@ async function detectLoop() {
       inferTimer = now;
     }
 
-    // 让出控制权给浏览器 + 控制推理频率
     const elapsed = performance.now() - t0;
     const targetInterval = 1000 / INFER_HZ;
     const wait = Math.max(0, targetInterval - elapsed);
@@ -470,97 +491,32 @@ async function detectLoop() {
   }
 }
 
-// ============ ★ 渲染循环（独立，rAF 满帧）============
+// ============ 渲染循环（独立）============
 function renderLoop() {
   if (!running) return;
-
   const now = performance.now();
   const cw = overlay.width, ch = overlay.height;
   const screenCx = cw / 2, screenCy = ch / 2;
 
+  // ★ 只在推理结果更新时重画（省一半以上工作量）
+  const needRedraw = (latestPosesTime !== lastDrawnPosesTime);
+  if (needRedraw) {
+    lastDrawnPosesTime = latestPosesTime;
+    drawOverlay(cw, ch, screenCx, screenCy);
+  }
+
+  // 选择目标 + 发送数据（这个每次都要做，因为平滑在变）
+  const part = aimPartEl.value;
+  const mode = targetModeEl.value;
   const roiW = cw * roiPercent / 100;
   const roiH = ch * roiPercent / 100;
   const roi = { x1: (cw - roiW) / 2, y1: (ch - roiH) / 2, x2: (cw + roiW) / 2, y2: (ch + roiH) / 2 };
 
-  const poses = latestPoses;
-
-  ctx.clearRect(0, 0, cw, ch);
-  personCountEl.textContent = poses.length;
-
-  const part = aimPartEl.value;
-  const mode = targetModeEl.value;
-
-  // 构建候选
-  const candidates = [];
-  for (const pose of poses) {
-    const bbox = getBBox(pose.keypoints);
-    if (!bbox) continue;
-    const aim = getAimPoint(pose.keypoints, part);
-    if (!aim) continue;
-    const validKpCount = pose.keypoints.filter(ok).length;
-    const distToCross = Math.hypot(aim.x - screenCx, aim.y - screenCy);
-    const trackId = (pose.id !== undefined && pose.id !== null) ? pose.id : null;
-    candidates.push({ aim, bbox, keypoints: pose.keypoints, validKpCount, distToCross, trackId, score: 0 });
-  }
-
-  // 关键点
-  ctx.fillStyle = 'rgba(79,195,247,0.45)';
-  for (const pose of poses) {
-    for (const k of pose.keypoints) {
-      if (ok(k)) ctx.fillRect(k.x - 1.5, k.y - 1.5, 3, 3);
-    }
-  }
-
-  // ROI 遮罩
-  if (roiEnabled) {
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-    ctx.fillRect(0, 0, cw, roi.y1);
-    ctx.fillRect(0, roi.y2, cw, ch - roi.y2);
-    ctx.fillRect(0, roi.y1, roi.x1, roiH);
-    ctx.fillRect(roi.x2, roi.y1, cw - roi.x2, roiH);
-  }
-
-  // 所有候选框（灰白虚线）
-  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([3, 3]);
-  for (const c of candidates) ctx.strokeRect(c.bbox.x1, c.bbox.y1, c.bbox.w, c.bbox.h);
-  ctx.setLineDash([]);
-
-  // ROI 边框
-  if (roiEnabled) {
-    ctx.strokeStyle = 'rgba(255,82,82,0.85)';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([6, 4]);
-    ctx.strokeRect(roi.x1, roi.y1, roiW, roiH);
-    ctx.setLineDash([]);
-    const L = 10;
-    ctx.strokeStyle = 'rgba(255,82,82,1)';
-    ctx.beginPath();
-    ctx.moveTo(roi.x1, roi.y1 + L); ctx.lineTo(roi.x1, roi.y1); ctx.lineTo(roi.x1 + L, roi.y1);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(roi.x2 - L, roi.y1); ctx.lineTo(roi.x2, roi.y1); ctx.lineTo(roi.x2, roi.y1 + L);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(roi.x1, roi.y2 - L); ctx.lineTo(roi.x1, roi.y2); ctx.lineTo(roi.x1 + L, roi.y2);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(roi.x2 - L, roi.y2); ctx.lineTo(roi.x2, roi.y2); ctx.lineTo(roi.x2, roi.y2 - L);
-    ctx.stroke();
-    ctx.fillStyle = 'rgba(255,82,82,0.85)';
-    ctx.font = 'bold 10px monospace';
-    ctx.fillText('ROI ' + roiPercent + '%', roi.x1 + 4, roi.y1 + 11);
-  }
-
-  // 选目标
+  const candidates = buildCandidates(latestPoses, part, screenCx, screenCy);
   const result = selectTarget(candidates, mode, screenCx, screenCy, roi);
   const target = result.target;
 
-  let roiCount = 0;
-  for (const c of candidates) if (!roiEnabled || inROI(c.aim, roi)) roiCount++;
-  roiCountEl.textContent = roiCount;
-
+  // 更新 UI 徽章
   if (result.lockState === 'active') {
     lockBadge.textContent = '已锁定 #' + lockedTrackId;
     lockBadge.className = 'lock-badge active';
@@ -578,38 +534,6 @@ function renderLoop() {
     hasTarget = 1;
     dx = target.aim.x - screenCx;
     dy = target.aim.y - screenCy;
-
-    // 高亮选定目标
-    ctx.strokeStyle = '#ffd54f';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(target.bbox.x1, target.bbox.y1, target.bbox.w, target.bbox.h);
-
-    // 瞄准点
-    ctx.fillStyle = '#7cff7c';
-    ctx.beginPath();
-    ctx.arc(target.aim.x, target.aim.y, 5, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.strokeStyle = '#000';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-
-    // 到准星连线
-    ctx.strokeStyle = 'rgba(255,213,79,0.55)';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(target.aim.x, target.aim.y);
-    ctx.lineTo(screenCx, screenCy);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // 标签
-    ctx.fillStyle = '#ffd54f';
-    ctx.font = 'bold 11px monospace';
-    const idLabel = target.trackId !== null ? ('#' + target.trackId) : '';
-    const scoreLabel = ' ' + target.score.toFixed(2);
-    ctx.fillText(idLabel + scoreLabel, target.bbox.x1, target.bbox.y1 - 4);
-
     lockedIdEl.textContent = target.trackId !== null ? target.trackId : '-';
     targetScoreEl.textContent = target.score.toFixed(3);
     lockAgeEl.textContent = lockAge;
@@ -617,17 +541,8 @@ function renderLoop() {
     lockedIdEl.textContent = lockedTrackId !== null ? lockedTrackId : '-';
     targetScoreEl.textContent = '-';
     lockAgeEl.textContent = lockAge;
-
-    // 无目标时画面中央显示 STOP
-    ctx.save();
-    ctx.fillStyle = 'rgba(255,82,82,0.85)';
-    ctx.font = 'bold 22px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText('STOP', cw / 2, ch / 2 - 20);
-    ctx.restore();
   }
 
-  // ★ 关键修复：有目标才平滑，无目标立即清零
   if (hasTarget) {
     smoothDx = smoothDx * SMOOTH_ALPHA + dx * (1 - SMOOTH_ALPHA);
     smoothDy = smoothDy * SMOOTH_ALPHA + dy * (1 - SMOOTH_ALPHA);
@@ -639,14 +554,13 @@ function renderLoop() {
   dxEl.textContent = Math.round(smoothDx);
   dyEl.textContent = Math.round(smoothDy);
 
-  // 发送（限速）
   const interval = 1000 / SEND_HZ;
   if (now - lastSendTime >= interval) {
     lastSendTime = now;
     sendAim(smoothDx, smoothDy, hasTarget);
   }
 
-  // 渲染 FPS
+  // FPS
   fpsCount++;
   if (now - fpsTimer >= 1000) {
     const fps = fpsCount;
@@ -654,10 +568,10 @@ function renderLoop() {
     fpsCount = 0;
     fpsTimer = now;
     if (fps < 8) {
-      warnBox.textContent = '⚠ ' + fps + ' FPS 偏低。建议：推理频率降到 6Hz，输入尺寸降到 128，或改用 SinglePose';
+      warnBox.textContent = '⚠ ' + fps + ' FPS 偏低。建议：画面分辨率降到 480 或 320，推理频率降到 4~6Hz';
       warnBox.classList.add('show');
-    } else if (fps < 15) {
-      warnBox.textContent = '提示：' + fps + ' FPS 可用，若卡顿可降推理频率到 6Hz';
+    } else if (fps < 20) {
+      warnBox.textContent = '提示：' + fps + ' FPS 可用，若卡顿可降画面分辨率';
       warnBox.classList.add('show');
     } else {
       warnBox.classList.remove('show');
@@ -665,6 +579,116 @@ function renderLoop() {
   }
 
   requestAnimationFrame(renderLoop);
+}
+
+function buildCandidates(poses, part, screenCx, screenCy) {
+  const out = [];
+  for (const pose of poses) {
+    const bbox = getBBox(pose.keypoints);
+    if (!bbox) continue;
+    const aim = getAimPoint(pose.keypoints, part);
+    if (!aim) continue;
+    const validKpCount = pose.keypoints.filter(ok).length;
+    const distToCross = Math.hypot(aim.x - screenCx, aim.y - screenCy);
+    const trackId = (pose.id !== undefined && pose.id !== null) ? pose.id : null;
+    out.push({ aim, bbox, keypoints: pose.keypoints, validKpCount, distToCross, trackId, score: 0 });
+  }
+  return out;
+}
+
+// ============ 画覆盖层（只在推理更新时调用）============
+function drawOverlay(cw, ch, screenCx, screenCy) {
+  ctx.clearRect(0, 0, cw, ch);
+  const part = aimPartEl.value;
+
+  const roiW = cw * roiPercent / 100;
+  const roiH = ch * roiPercent / 100;
+  const roi = { x1: (cw - roiW) / 2, y1: (ch - roiH) / 2, x2: (cw + roiW) / 2, y2: (ch + roiH) / 2 };
+
+  const poses = latestPoses;
+  personCountEl.textContent = poses.length;
+
+  // 关键点
+  ctx.fillStyle = 'rgba(79,195,247,0.55)';
+  for (const pose of poses) {
+    for (const k of pose.keypoints) {
+      if (ok(k)) ctx.fillRect((k.x * scaleX) - 1.5, (k.y * scaleY) - 1.5, 3, 3);
+    }
+  }
+
+  // ROI 遮罩
+  if (roiEnabled) {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.fillRect(0, 0, cw, roi.y1);
+    ctx.fillRect(0, roi.y2, cw, ch - roi.y2);
+    ctx.fillRect(0, roi.y1, roi.x1, roiH);
+    ctx.fillRect(roi.x2, roi.y1, cw - roi.x2, roiH);
+  }
+
+  // 候选框
+  const candidates = buildCandidates(poses, part, screenCx, screenCy);
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  for (const c of candidates) ctx.strokeRect(c.bbox.x1, c.bbox.y1, c.bbox.w, c.bbox.h);
+  ctx.setLineDash([]);
+
+  // ROI 边框
+  if (roiEnabled) {
+    ctx.strokeStyle = 'rgba(255,82,82,0.85)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(roi.x1, roi.y1, roiW, roiH);
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(255,82,82,0.85)';
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText('ROI ' + roiPercent + '%', roi.x1 + 4, roi.y1 + 11);
+  }
+
+  // 选定目标高亮
+  const mode = targetModeEl.value;
+  const result = selectTarget(candidates, mode, screenCx, screenCy, roi);
+  const target = result.target;
+
+  let roiCount = 0;
+  for (const c of candidates) if (!roiEnabled || inROI(c.aim, roi)) roiCount++;
+  roiCountEl.textContent = roiCount;
+
+  if (target) {
+    ctx.strokeStyle = '#ffd54f';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(target.bbox.x1, target.bbox.y1, target.bbox.w, target.bbox.h);
+
+    ctx.fillStyle = '#7cff7c';
+    ctx.beginPath();
+    ctx.arc(target.aim.x, target.aim.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(255,213,79,0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(target.aim.x, target.aim.y);
+    ctx.lineTo(screenCx, screenCy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = '#ffd54f';
+    ctx.font = 'bold 11px monospace';
+    const idLabel = target.trackId !== null ? ('#' + target.trackId) : '';
+    const scoreLabel = ' ' + target.score.toFixed(2);
+    ctx.fillText(idLabel + scoreLabel, target.bbox.x1, target.bbox.y1 - 4);
+  } else {
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,82,82,0.85)';
+    ctx.font = 'bold 22px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('STOP', cw / 2, ch / 2 - 20);
+    ctx.restore();
+  }
 }
 
 // ============ 创建检测器 ============
@@ -695,19 +719,19 @@ async function startAll() {
   try {
     if (detector) { try { detector.dispose(); } catch (e) {} detector = null; }
 
-    // 读取推理频率
-    INFER_HZ = parseInt(inferHzEl.value) || 12;
+    INFER_HZ = parseInt(inferHzEl.value) || 8;
+    CANVAS_HEIGHT = parseInt(canvasSizeEl.value) || 360;
 
     detector = await createDetector();
     if (!videoStream) await startCamera();
+    else applyCanvasSize();
 
     lockedTrackId = null;
     lockedMissFrames = 0;
     lockAge = 0;
-
-    // ★ 重置共享状态
     latestPoses = [];
     latestPosesTime = 0;
+    lastDrawnPosesTime = 0;
     inferCount = 0;
     inferTimer = performance.now();
     fpsCount = 0;
@@ -715,10 +739,8 @@ async function startAll() {
 
     running = true;
     btnStart.textContent = '运行中...';
-
-    // ★ 同时启动两个独立循环
-    detectLoop();       // 推理（独立）
-    renderLoop();       // 渲染（独立）
+    detectLoop();
+    renderLoop();
   } catch (err) {
     console.error(err);
     alert('启动失败：' + err.message);
@@ -775,7 +797,6 @@ function updateRoiInfo() {
   roiInfoEl.textContent = roiEnabled ? ('中央 ' + roiPercent + '%') : '已禁用';
 }
 
-// 模型/尺寸/人数改变 → 需要重启
 [modelTypeEl, inputSizeEl, maxPosesEl].forEach(el => {
   el.addEventListener('change', () => {
     if (running) {
@@ -785,9 +806,8 @@ function updateRoiInfo() {
   });
 });
 
-// ★ 推理频率：运行时也能即时生效，无需重启
 inferHzEl.addEventListener('change', () => {
-  INFER_HZ = parseInt(inferHzEl.value) || 12;
+  INFER_HZ = parseInt(inferHzEl.value) || 8;
   if (running) {
     warnBox.textContent = '推理频率已改为 ' + INFER_HZ + ' Hz（立即生效）';
     warnBox.classList.add('show');
@@ -795,15 +815,23 @@ inferHzEl.addEventListener('change', () => {
   }
 });
 
+canvasSizeEl.addEventListener('change', () => {
+  CANVAS_HEIGHT = parseInt(canvasSizeEl.value) || 360;
+  if (video.videoWidth) applyCanvasSize();
+  if (running) {
+    warnBox.textContent = '画面分辨率已改为 ' + overlay.width + '×' + overlay.height + '（立即生效）';
+    warnBox.classList.add('show');
+    setTimeout(() => warnBox.classList.remove('show'), 2000);
+  }
+});
+
 targetModeEl.addEventListener('change', resetLock);
 
-// IP 保存
 const savedIp = localStorage.getItem('espIp');
 if (savedIp) espIpEl.value = savedIp;
 espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.value));
 
-// 偏好保存
-['modelType', 'inputSize', 'maxPoses', 'aimPart', 'targetMode', 'inferHz'].forEach(id => {
+['modelType', 'inputSize', 'maxPoses', 'aimPart', 'targetMode', 'inferHz', 'canvasSize'].forEach(id => {
   const el = document.getElementById(id);
   const saved = localStorage.getItem('pref_' + id);
   if (saved !== null && el) el.value = saved;
@@ -819,10 +847,10 @@ espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.v
   if (el) el.addEventListener('change', () => localStorage.setItem('pref_' + id, el.value));
 });
 
-// 初始化
 roiEnabled = roiEnabledEl.checked;
 roiPercent = parseInt(roiPercentEl.value);
-INFER_HZ = parseInt(inferHzEl.value) || 12;
+INFER_HZ = parseInt(inferHzEl.value) || 8;
+CANVAS_HEIGHT = parseInt(canvasSizeEl.value) || 360;
 roiPercentValEl.textContent = roiPercent + '%';
 updateRoiInfo();
 </script>
