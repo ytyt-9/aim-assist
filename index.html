@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v31</title>
+<title>视觉跟随 · v32</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -70,7 +70,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v31</h1>
+<h1>视觉跟随 · v32</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -127,7 +127,7 @@
   </div>
 
   <div class="brake-box">
-    <div class="group-label">★ 到位锁死 + 迟滞（v31 核心）</div>
+    <div class="group-label">★ 到位锁死 + 迟滞 + 步长比例（v32）</div>
     <div class="row">
       <label>刹车距离</label>
       <input type="number" id="brakeDistance" min="10" max="300" step="5" value="60">
@@ -143,13 +143,27 @@
       <input type="number" id="exitRadius" min="2" max="150" step="1" value="25">
       <span class="roi-info">px（锁死后超过此范围才重跟）</span>
     </div>
+    <div class="row">
+      <label>步长比例</label>
+      <select id="frameStepRatio">
+        <option value="0.20">20%（最稳，最慢）</option>
+        <option value="0.30">30%（稳）</option>
+        <option value="0.40" selected>40%（推荐）</option>
+        <option value="0.50">50%（平衡）</option>
+        <option value="0.60">60%（快）</option>
+        <option value="0.70">70%（很快）</option>
+        <option value="0.80">80%（极快）</option>
+        <option value="0.90">90%（几乎一步到位）</option>
+        <option value="1.00">100%（不限制，可能过冲）</option>
+      </select>
+    </div>
     <div class="hint">
       <b>为什么之前会跑过？</b>手机发指令和检测之间有延迟，每帧移动量太大，累计起来就冲过去了。<br>
-      <b>v31 怎么解决？</b><br>
-      1. <b>到位立即锁死</b>：距离小于停止半径，立刻输出 0，不管按住多久都不动。<br>
-      2. <b>迟滞</b>：锁死后只有超过退出半径才重新跟随，避免检测抖动反复切换。<br>
-      3. <b>每帧步长限制</b>：每帧最多走剩余距离的 40%，多帧逐步靠近，从根源上杜绝过冲。<br>
-      <b>调参建议：</b>退出半径建议 ≥ 2× 停止半径；想更稳就加大退出半径。
+      <b>步长比例是什么？</b>每帧最多走剩余距离的百分之几。<br>
+      · <b>小比例（20~30%）</b>：多帧逐步逼近，几乎不可能过冲，但到位稍慢。<br>
+      · <b>大比例（70~90%）</b>：到位快，但配合延迟可能微过冲；有反过冲钳制时会贴住目标。<br>
+      · <b>100%</b>：不限制单帧步长，只靠钳制与停止半径控制，速度最快。<br>
+      <b>其它三层防护仍然生效：</b>到位立即锁死、迟滞退出、反过冲钳制。
     </div>
     <div class="speed-table">
       <span class="hdr">档位</span><span class="hdr">刹车倍率</span><span class="hdr">停止倍率</span>
@@ -280,7 +294,7 @@
   </div>
   <div class="stat" style="margin-top:4px;">
     <span>锁死: <b id="lockState">-</b></span>
-    <span>档位: <b id="speedMulShow">-</b></span>
+    <span>步长比: <b id="stepRatioShow">-</b></span>
     <span>原始: <b id="lockedId">-</b></span>
   </div>
 
@@ -374,15 +388,15 @@ const MOVING_BOOST = 2.0;
 const AIM_SMOOTH_ALPHA = 0.82;
 const LOCK_TIMEOUT_FRAMES = 20;
 
-// ★★★ v31 核心：每帧步长最多走剩余距离的 40%，杜绝多帧累计过冲
-const FRAME_STEP_RATIO = 0.40;
+// ★★★ v32：每帧步长比例，实时可调
+let FRAME_STEP_RATIO = 0.40;
 
-// ★★★ v31：到位锁死 + 迟滞
-let brakeDistance = 60;    // 刹车距离基准（进入此范围开始减速）
-let stopRadius    = 10;    // 停止半径基准（进入此范围立即锁死）
-let exitRadius    = 25;    // 退出半径基准（锁死后超过此范围才重新跟随）
+// 到位锁死 + 迟滞
+let brakeDistance = 60;
+let stopRadius    = 10;
+let exitRadius    = 25;
 
-let lockedStable = false;  // 当前是否处于到位锁死状态
+let lockedStable = false;
 
 // 离屏推理 canvas
 const inferCanvas = document.createElement('canvas');
@@ -450,7 +464,7 @@ const brakeZoneEl = document.getElementById('brakeZone');
 const stopZoneEl = document.getElementById('stopZone');
 const exitZoneEl = document.getElementById('exitZone');
 const lockStateEl = document.getElementById('lockState');
-const speedMulShowEl = document.getElementById('speedMulShow');
+const stepRatioShowEl = document.getElementById('stepRatioShow');
 const lockedIdEl = document.getElementById('lockedId');
 const lockBadge = document.getElementById('lockBadge');
 const arriveBadge = document.getElementById('arriveBadge');
@@ -471,6 +485,7 @@ const deadZoneEl = document.getElementById('deadZone');
 const brakeDistanceEl = document.getElementById('brakeDistance');
 const stopRadiusEl = document.getElementById('stopRadius');
 const exitRadiusEl = document.getElementById('exitRadius');
+const frameStepRatioEl = document.getElementById('frameStepRatio');
 const dirXFlipEl = document.getElementById('dirXFlip');
 const dirYFlipEl = document.getElementById('dirYFlip');
 const roiEnabledEl = document.getElementById('roiEnabled');
@@ -511,7 +526,6 @@ function updateBrakeParams() {
   if (exitRadius < 2) exitRadius = 2;
   if (exitRadius > 150) exitRadius = 150;
 
-  // 保证层级关系：停止 < 退出 < 刹车
   if (exitRadius <= stopRadius) {
     exitRadius = stopRadius + 5;
     exitRadiusEl.value = exitRadius;
@@ -522,7 +536,13 @@ function updateBrakeParams() {
   }
 }
 
-// 档位倍率映射
+// ★★★ v32：步长比例实时读取
+function updateStepRatio() {
+  FRAME_STEP_RATIO = parseFloat(frameStepRatioEl.value) || 0.40;
+  if (FRAME_STEP_RATIO < 0.05) FRAME_STEP_RATIO = 0.05;
+  if (FRAME_STEP_RATIO > 1.0) FRAME_STEP_RATIO = 1.0;
+}
+
 function getSpeedScale() {
   const g = MOVE_GAIN;
   if (g <= 0.05) return { brake: 0.50, stop: 0.70, label: '慢 0.5×/0.7×' };
@@ -926,7 +946,7 @@ function renderLoop() {
     if (DIR_Y_FLIP) dy = -dy;
   }
 
-  // ★★★ v31 核心：到位锁死 + 迟滞 + 每帧步长限制
+  // ★★★ v32 核心：到位锁死 + 迟滞 + 实时可调步长比例
   const scale = getSpeedScale();
   const effBrake = brakeDistance * scale.brake;
   const effStop  = stopRadius * scale.stop;
@@ -938,25 +958,19 @@ function renderLoop() {
   if (hasTarget) {
     dist = Math.hypot(dx, dy);
 
-    // 未锁死时，先判断是否进入停止区
     if (!lockedStable) {
       if (dist <= effStop || (DEAD_ZONE > 0 && dist <= DEAD_ZONE)) {
-        // 立即锁死
         lockedStable = true;
       }
     } else {
-      // 已锁死，判断是否超过退出半径
       if (dist > effExit) {
-        // 目标真的移动了，解锁重新跟随
         lockedStable = false;
       }
     }
 
     if (lockedStable) {
-      // 锁死状态：输出 0，完全不动
       sendDx = 0; sendDy = 0;
     } else {
-      // 未锁死：正常跟随，但要减速 + 限制每帧步长
       let gainMul = 1;
       if (dist < effBrake && effBrake > effStop) {
         let t = (dist - effStop) / (effBrake - effStop);
@@ -968,24 +982,21 @@ function renderLoop() {
       let rawDx = dx * adaptiveGain * gainMul;
       let rawDy = dy * adaptiveGain * gainMul;
 
-      // ★ 每帧最多走剩余距离的 FRAME_STEP_RATIO
+      // ★ 每帧最多走剩余距离的 FRAME_STEP_RATIO（实时可调）
       const maxStep = Math.min(MAX_MOVE_PER_FRAME, dist * FRAME_STEP_RATIO);
       sendDx = Math.max(-maxStep, Math.min(maxStep, rawDx));
       sendDy = Math.max(-maxStep, Math.min(maxStep, rawDy));
 
-      // 保底最小步进（仅在离目标还有明显距离时）
       if (dist > effStop + MIN_SEND * 2) {
         if (Math.abs(rawDx) > 0.3 && Math.abs(sendDx) < MIN_SEND) sendDx = sendDx >= 0 ? MIN_SEND : -MIN_SEND;
         if (Math.abs(rawDy) > 0.3 && Math.abs(sendDy) < MIN_SEND) sendDy = sendDy >= 0 ? MIN_SEND : -MIN_SEND;
       }
     }
   } else {
-    // 没有目标，重置锁死状态
     lockedStable = false;
     dist = 0;
   }
 
-  // 更新状态徽章
   if (hasTarget && lockedStable) {
     arriveBadge.textContent = '已到位锁死';
     arriveBadge.className = 'lock-badge arrive';
@@ -1004,7 +1015,7 @@ function renderLoop() {
   stopZoneEl.textContent = Math.round(effStop);
   exitZoneEl.textContent = Math.round(effExit);
   lockStateEl.textContent = lockedStable ? '锁死' : (hasTarget ? '跟随' : '-');
-  speedMulShowEl.textContent = scale.label;
+  stepRatioShowEl.textContent = Math.round(FRAME_STEP_RATIO * 100) + '%';
 
   lockedIdEl.textContent = hasTarget
     ? ('X=' + Math.round(targetAimX - screenCx) + ' Y=' + Math.round(targetAimY - screenCy))
@@ -1071,26 +1082,22 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     drawText('ROI ' + roiPercent + '%', roi.x1 + 4, roi.y1 + 11);
   }
 
-  // 绘制当前档位下的刹车区 / 停止区 / 退出区参考圆
   if (latestPersons.length > 0) {
     const scale = getSpeedScale();
     const effBrake = brakeDistance * scale.brake;
     const effStop  = stopRadius * scale.stop;
     const effExit  = exitRadius * scale.stop;
     ctx.setLineDash([4, 4]);
-    // 刹车区（绿色）
     ctx.strokeStyle = 'rgba(124, 255, 124, 0.35)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.arc(screenCx, screenCy, effBrake, 0, Math.PI * 2);
     ctx.stroke();
-    // 退出区（橙色）
     ctx.strokeStyle = 'rgba(255, 183, 77, 0.55)';
     ctx.lineWidth = 1.2;
     ctx.beginPath();
     ctx.arc(screenCx, screenCy, effExit, 0, Math.PI * 2);
     ctx.stroke();
-    // 停止区（蓝色）
     ctx.strokeStyle = 'rgba(79, 195, 247, 0.8)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -1185,6 +1192,7 @@ async function startAll() {
     INFER_HZ = parseInt(inferHzEl.value) || 8;
     updateSpeedParams();
     updateBrakeParams();
+    updateStepRatio();
     DEAD_ZONE = parseFloat(deadZoneEl.value) || 0;
     DIR_X_FLIP = (dirXFlipEl.value === 'invert');
     DIR_Y_FLIP = (dirYFlipEl.value === 'invert');
@@ -1306,6 +1314,16 @@ exitRadiusEl.addEventListener('change', () => {
   localStorage.setItem('pref_exitRadius', exitRadiusEl.value);
 });
 
+// ★★★ v32：步长比例实时生效
+frameStepRatioEl.addEventListener('change', () => {
+  updateStepRatio();
+  if (running) {
+    showInfo('步长比例改为 ' + Math.round(FRAME_STEP_RATIO * 100) + '%（立即生效）');
+    setTimeout(hideWarn, 1500);
+  }
+  localStorage.setItem('pref_frameStepRatio', frameStepRatioEl.value);
+});
+
 deadZoneEl.addEventListener('change', () => {
   DEAD_ZONE = parseFloat(deadZoneEl.value) || 0;
   if (running) { showInfo('死区改为 ' + DEAD_ZONE + ' px'); setTimeout(hideWarn, 1500); }
@@ -1341,7 +1359,7 @@ if (savedIp) espIpEl.value = savedIp;
 espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.value));
 
 ['aimPart', 'targetMode', 'inferHz', 'minScore', 'maxPoses', 'moveSpeed', 'deadZone',
- 'brakeDistance', 'stopRadius', 'exitRadius', 'dirXFlip', 'dirYFlip'].forEach(id => {
+ 'brakeDistance', 'stopRadius', 'exitRadius', 'frameStepRatio', 'dirXFlip', 'dirYFlip'].forEach(id => {
   const el = document.getElementById(id);
   const saved = localStorage.getItem('pref_' + id);
   if (saved !== null && el) el.value = saved;
@@ -1366,6 +1384,7 @@ roiPercent = parseInt(roiPercentEl.value);
 INFER_HZ = parseInt(inferHzEl.value) || 8;
 updateSpeedParams();
 updateBrakeParams();
+updateStepRatio();
 DEAD_ZONE = parseFloat(deadZoneEl.value) || 0;
 DIR_X_FLIP = (dirXFlipEl.value === 'invert');
 DIR_Y_FLIP = (dirYFlipEl.value === 'invert');
