@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · 流畅版 v4</title>
+<title>视觉跟随 · 流畅版 v5</title>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
 <style>
@@ -59,11 +59,10 @@
 </head>
 <body>
 
-<h1>视觉跟随 · 流畅版 v4</h1>
+<h1>视觉跟随 · 流畅版 v5</h1>
 
 <div class="video-wrap">
   <video id="video" autoplay playsinline muted></video>
-  <video id="inferVideo" autoplay playsinline muted style="display:none;"></video>
   <canvas id="overlay"></canvas>
   <div class="crosshair"></div>
 </div>
@@ -85,10 +84,10 @@
   <div class="row">
     <label>摄像头</label>
     <select id="camRes">
-      <option value="240">320×240 @ 30fps（最省，应急）</option>
+      <option value="240" selected>320×240 @ 30fps（最省，先试这个）</option>
       <option value="360">640×360 @ 30fps（流畅）</option>
-      <option value="480" selected>640×480 @ 30fps（推荐）</option>
-      <option value="720">1280×720 @ 30fps（清晰，可能卡）</option>
+      <option value="480">640×480 @ 30fps（推荐）</option>
+      <option value="720">1280×720 @ 30fps（清晰）</option>
       <option value="1080">1920×1080 @ 30fps（最清晰）</option>
     </select>
   </div>
@@ -253,7 +252,6 @@ let scaleX = 1, scaleY = 1;
 
 // ============ DOM ============
 const video = document.getElementById('video');
-const inferVideo = document.getElementById('inferVideo');   // ★ 推理专用 video
 const overlay = document.getElementById('overlay');
 const ctx = overlay.getContext('2d', { alpha: true, desynchronized: true });
 const espIpEl = document.getElementById('espIp');
@@ -326,7 +324,7 @@ function sendAim(dx, dy, hasTarget) {
   sentEl.textContent = sentCount;
 }
 
-// ============ 摄像头（exact 强制 + 共享流给推理）============
+// ============ 摄像头（ideal 软约束 + 单 video）============
 async function startCamera() {
   const res = camResEl.value;
   let w, h;
@@ -336,15 +334,14 @@ async function startCamera() {
   else if (res === '1080') { w = 1920; h = 1080; }
   else                     { w = 1280; h = 720;  }
 
-  // ★ 用 exact 强制分辨率，避免浏览器偷偷降低
+  // ★ 关键：用 ideal 而非 exact，frameRate 用 min/max 给浏览器弹性
   const constraints = {
-    width:  { exact: w },
-    height: { exact: h },
-    frameRate: { ideal: 30, max: 30 },
+    width:     { ideal: w },
+    height:    { ideal: h },
+    frameRate: { ideal: 30, min: 15, max: 30 },
     facingMode: { ideal: 'environment' }
   };
 
-  // 先关旧流
   if (videoStream) {
     videoStream.getTracks().forEach(t => t.stop());
     videoStream = null;
@@ -352,12 +349,9 @@ async function startCamera() {
 
   videoStream = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
 
-  // ★ 同一个流喂给两个 video：一个显示、一个推理
+  // ★ 只给主 video，不用 inferVideo（排除共享流的 bug）
   video.srcObject = videoStream;
-  inferVideo.srcObject = videoStream;
-
   await video.play();
-  await inferVideo.play();
 
   applyCanvasSize();
 
@@ -530,12 +524,12 @@ function selectTarget(candidates, mode, screenCx, screenCy, roi) {
   return { target: selected, lockState: 'off' };
 }
 
-// ============ 推理循环（★ 读 inferVideo）============
+// ============ 推理循环（读主 video）============
 async function detectLoop() {
   while (running) {
     const t0 = performance.now();
     try {
-      const poses = await detector.estimatePoses(inferVideo, {   // ★ 用 inferVideo
+      const poses = await detector.estimatePoses(video, {
         maxPoses: parseInt(maxPosesEl.value),
         flipHorizontal: false
       });
@@ -635,9 +629,9 @@ function renderLoop() {
 
     let diag = null;
     if (backend !== 'webgl' && backend !== 'webgpu') {
-      diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）—— 推理会阻塞主线程！请检查手机是否支持 WebGL。';
+      diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）—— 推理会阻塞主线程！换 Chrome 或换设备。';
     } else if (vidFps > 0 && vidFps < 18) {
-      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 把"摄像头"改成更低一档（320×240 或 640×360）';
+      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 是摄像头慢。请关闭其它占用摄像头的 App，或换 Chrome 浏览器。若仍慢，手机摄像头本身性能有限。';
     } else if (fps < 30) {
       diag = '⚠ rAF 只有 ' + fps + ' fps —— 把推理频率降到 6Hz 或画布降一档';
     } else if (infFps < 5 && INFER_HZ >= 8) {
@@ -837,7 +831,6 @@ function stopAll() {
     videoStream = null;
   }
   video.srcObject = null;
-  inferVideo.srcObject = null;
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   personCountEl.textContent = '0';
   roiCountEl.textContent = '0';
