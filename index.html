@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>视觉跟随 · MultiPose + ROI + 锁定</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
+  h1 { font-size: 1rem; margin: 6px 0; color: #4fc3f7; }
+  .video-wrap { position: relative; width: 100%; max-width: 480px; border: 2px solid #4fc3f7; border-radius: 6px; overflow: hidden; background: #000; }
+  video { width: 100%; display: block; }
+  canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+  .crosshair { position: absolute; top: 50%; left: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; z-index: 3; }
+  .crosshair::before, .crosshair::after { content: ''; position: absolute; background: #ffd54f; box-shadow: 0 0 3px #000; }
+  .crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
+  .crosshair::after { top: 10px; left: 0; width: 22px; height: 2px; }
+  .panel { width: 100%; max-width: 480px; margin-top: 8px; background: #16213e; border-radius: 6px; padding: 8px; }
+  .row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 0.82rem; flex-wrap: wrap; }
+  .row label { flex: 0 0 auto; color: #9bc4e2; font-size: 0.75rem; min-width: 58px; }
+  .row input[type=text], .row input[type=number], .row select { flex: 1 1 auto; min-width: 0; padding: 4px 6px; border-radius: 4px; border: 1px solid #4fc3f7; background: #0a1626; color: #eee; font-family: monospace; font-size: 0.8rem; }
+  .row select { -webkit-appearance: none; appearance: none; }
+  button { padding: 6px 12px; border: none; border-radius: 5px; background: #4fc3f7; color: #000; font-weight: bold; cursor: pointer; font-size: 0.8rem; }
+  button:hover { background: #38b0e0; }
+  button:active { transform: scale(0.96); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.danger { background: #ff5252; color: #fff; }
+  button.warn { background: #ffb74d; color: #000; }
+  .status { font-size: 0.75rem; color: #9bc4e2; }
+  .status.ok { color: #7cff7c; }
+  .status.err { color: #ff5252; }
+  .stat { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; font-size: 0.7rem; font-family: monospace; color: #eee; }
+  .stat span { background: #0a1626; padding: 3px 5px; border-radius: 3px; }
+  .stat b { color: #ffd54f; }
+  .warn-box { display: none; background: #5d3a00; border: 1px solid #ffb74d; color: #ffb74d; padding: 5px 8px; border-radius: 4px; font-size: 0.7rem; margin-top: 6px; line-height: 1.3; }
+  .warn-box.show { display: block; }
+  .sec-title { color: #4fc3f7; font-size: 0.72rem; margin: 6px 0 4px; border-bottom: 1px solid #2a4a7a; padding-bottom: 3px; }
+  .sec-title:first-child { margin-top: 0; }
+  .switch { position: relative; display: inline-block; width: 34px; height: 18px; flex: 0 0 auto; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background: #555; border-radius: 18px; transition: 0.2s; }
+  .switch .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 2px; bottom: 2px; background: white; border-radius: 50%; transition: 0.2s; }
+  .switch input:checked + .slider { background: #4fc3f7; }
+  .switch input:checked + .slider:before { transform: translateX(16px); }
+  .roi-info { font-size: 0.7rem; color: #ffd54f; font-family: monospace; }
+  .lock-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; font-weight: bold; }
+  .lock-badge.active { background: #7cff7c; color: #000; }
+  .lock-badge.waiting { background: #ffb74d; color: #000; }
+  .lock-badge.off { background: #444; color: #aaa; }
+</style>
+</head>
+<body>
+
+<h1>视觉跟随 · MultiPose + ROI + 锁定</h1>
+
+<div class="video-wrap">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="overlay"></canvas>
+  <div class="crosshair"></div>
+</div>
+
+<div class="panel">
+
+  <div class="sec-title">连接</div>
+  <div class="row">
+    <label>ESP32 IP</label>
+    <input type="text" id="espIp" value="192.168.1.100" placeholder="192.168.x.x">
+    <button id="btnConnect">连接</button>
+  </div>
+  <div class="row">
+    <label>状态</label>
+    <span class="status" id="wsStatus">未连接</span>
+  </div>
+
+  <div class="sec-title">检测设置</div>
+  <div class="row">
+    <label>模型</label>
+    <select id="modelType">
+      <option value="multi" selected>MultiPose（多人）</option>
+      <option value="single">SinglePose（单人，快）</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>输入尺寸</label>
+    <select id="inputSize">
+      <option value="128">128（最快）</option>
+      <option value="192" selected>192（推荐）</option>
+      <option value="256">256（默认）</option>
+      <option value="320">320（精度高，慢）</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>最大人数</label>
+    <select id="maxPoses">
+      <option value="3" selected>3</option>
+      <option value="5">5</option>
+      <option value="6">6</option>
+    </select>
+  </div>
+
+  <div class="sec-title">ROI 区域限制（只检测中央区域，过滤队友/UI）</div>
+  <div class="row">
+    <label>启用</label>
+    <label class="switch">
+      <input type="checkbox" id="roiEnabled" checked>
+      <span class="slider"></span>
+    </label>
+    <span class="roi-info" id="roiInfo">中央 60%</span>
+  </div>
+  <div class="row">
+    <label>ROI 大小</label>
+    <input type="range" id="roiPercent" min="30" max="100" step="5" value="60" style="flex:1; accent-color:#4fc3f7;">
+    <span class="roi-info" id="roiPercentVal">60%</span>
+  </div>
+
+  <div class="sec-title">瞄准设置</div>
+  <div class="row">
+    <label>瞄准部位</label>
+    <select id="aimPart">
+      <option value="head" selected>头部</option>
+      <option value="body">身体</option>
+      <option value="leg">腿部</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>选目标</label>
+    <select id="targetMode">
+      <option value="locked" selected>锁定目标（默认，不切换）</option>
+      <option value="combo">智能综合</option>
+      <option value="crosshair">最接近准星</option>
+      <option value="lowest">画面最下方（最近）</option>
+      <option value="largest">画面最大（最近）</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>锁定状态</label>
+    <span class="lock-badge off" id="lockBadge">未锁定</span>
+    <button id="btnResetLock" class="warn" style="margin-left:auto; padding:4px 10px; font-size:0.72rem;">重置锁定</button>
+  </div>
+
+  <div class="sec-title">操作</div>
+  <div class="row">
+    <button id="btnStart" style="flex:1;">启动摄像头 + 检测</button>
+    <button id="btnStop" class="danger" style="flex:0 0 auto;">停止</button>
+  </div>
+
+  <div class="stat" style="margin-top:6px;">
+    <span>人物: <b id="personCount">0</b></span>
+    <span>ROI内: <b id="roiCount">0</b></span>
+    <span>FPS: <b id="fps">0</b></span>
+  </div>
+  <div class="stat" style="margin-top:4px;">
+    <span>dx: <b id="dx">0</b></span>
+    <span>dy: <b id="dy">0</b></span>
+    <span>发送: <b id="sent">0</b></span>
+  </div>
+  <div class="stat" style="margin-top:4px;">
+    <span>锁定ID: <b id="lockedId">-</b></span>
+    <span>目标分: <b id="targetScore">-</b></span>
+    <span>锁定帧: <b id="lockAge">0</b></span>
+  </div>
+
+  <div class="warn-box" id="warnBox"></div>
+</div>
+
+<script>
+const WS_PORT = 81;
+const SEND_HZ = 30;
+const KP_SCORE_MIN = 0.30;
+const SMOOTH_ALPHA = 0.55;
+const LOCK_TIMEOUT_FRAMES = 20;
+
+let ws = null;
+let wsConnected = false;
+let videoStream = null;
+let detector = null;
+let running = false;
+let lastSendTime = 0;
+let sentCount = 0;
+let fpsCount = 0;
+let fpsTimer = 0;
+let smoothDx = 0, smoothDy = 0;
+
+let lockedTrackId = null;
+let lockedMissFrames = 0;
+let lockAge = 0;
+
+let roiEnabled = true;
+let roiPercent = 60;
+
+const video = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const ctx = overlay.getContext('2d');
+const espIpEl = document.getElementById('espIp');
+const wsStatusEl = document.getElementById('wsStatus');
+const personCountEl = document.getElementById('personCount');
+const roiCountEl = document.getElementById('roiCount');
+const fpsEl = document.getElementById('fps');
+const sentEl = document.getElementById('sent');
+const dxEl = document.getElementById('dx');
+const dyEl = document.getElementById('dy');
+const lockedIdEl = document.getElementById('lockedId');
+const targetScoreEl = document.getElementById('targetScore');
+const lockAgeEl = document.getElementById('lockAge');
+const lockBadge = document.getElementById('lockBadge');
+const btnConnect = document.getElementById('btnConnect');
+const btnStart = document.getElementById('btnStart');
+const btnStop = document.getElementById('btnStop');
+const btnResetLock = document.getElementById('btnResetLock');
+const aimPartEl = document.getElementById('aimPart');
+const targetModeEl = document.getElementById('targetMode');
+const modelTypeEl = document.getElementById('modelType');
+const inputSizeEl = document.getElementById('inputSize');
+const maxPosesEl = document.getElementById('maxPoses');
+const roiEnabledEl = document.getElementById('roiEnabled');
+const roiPercentEl = document.getElementById('roiPercent');
+const roiPercentValEl = document.getElementById('roiPercentVal');
+const roiInfoEl = document.getElementById('roiInfo');
+const warnBox = document.getElementById('warnBox');
+
+function connectWs() {
+  const ip = espIpEl.value.trim();
+  if (!ip) { alert('请输入 ESP32 IP'); return; }
+  if (ws) { try { ws.close(); } catch(e){} ws = null; }
+  wsStatusEl.textContent = '连接中...';
+  wsStatusEl.className = 'status';
+  ws = new WebSocket('ws://' + ip + ':' + WS_PORT + '/');
+  ws.onopen = () => {
+    wsConnected = true;
+    wsStatusEl.textContent = '已连接 ' + ip;
+    wsStatusEl.className = 'status ok';
+  };
+  ws.onclose = () => {
+    wsConnected = false;
+    wsStatusEl.textContent = '已断开';
+    wsStatusEl.className = 'status err';
+  };
+  ws.onerror = () => {
+    wsStatusEl.textContent = '连接失败（检查 IP / 同 WiFi / 混合内容）';
+    wsStatusEl.className = 'status err';
+  };
+}
+
+function sendAim(dx, dy, hasTarget) {
+  if (!wsConnected || !ws || ws.readyState !== 1) return;
+  const buf = new ArrayBuffer(6);
+  const v = new DataView(buf);
+  v.setUint8(0, 0xAB);
+  v.setUint8(1, hasTarget ? 0x01 : 0x00);
+  v.setInt16(2, Math.max(-32768, Math.min(32767, Math.round(dx))), true);
+  v.setInt16(4, Math.max(-32768, Math.min(32767, Math.round(dy))), true);
+  ws.send(buf);
+  sentCount++;
+  sentEl.textContent = sentCount;
+}
+
+async function startCamera() {
+  videoStream = await navigator.mediaDevices.getUserMedia({
+    video: {
+      width: { ideal: 320 },
+      height: { ideal: 240 },
+      frameRate: { ideal: 30, max: 60 },
+      facingMode: { ideal: 'environment' }
+    },
+    audio: false
+  });
+  video.srcObject = videoStream;
+  await video.play();
+  overlay.width = video.videoWidth || 320;
+  overlay.height = video.videoHeight || 240;
+}
+
+function kpMap(keypoints) {
+  const m = {};
+  keypoints.forEach(k => { m[k.name] = k; });
+  return m;
+}
+function ok(k) { return k && k.score >= KP_SCORE_MIN; }
+function avg(points) {
+  const x = points.reduce((s,p) => s + p.x, 0) / points.length;
+  const y = points.reduce((s,p) => s + p.y, 0) / points.length;
+  return { x, y };
+}
+
+function getAimPoint(keypoints, part) {
+  const kp = kpMap(keypoints);
+  if (part === 'head') {
+    if (ok(kp.nose)) return { x: kp.nose.x, y: kp.nose.y };
+    const eyes = [kp.left_eye, kp.right_eye].filter(ok);
+    if (eyes.length > 0) return avg(eyes);
+    const ears = [kp.left_ear, kp.right_ear].filter(ok);
+    if (ears.length > 0) return avg(ears);
+    const sh = [kp.left_shoulder, kp.right_shoulder].filter(ok);
+    if (sh.length > 0) { const a = avg(sh); return { x: a.x, y: a.y - 40 }; }
+    return null;
+  }
+  if (part === 'body') {
+    const ls = kp.left_shoulder, rs = kp.right_shoulder;
+    const lh = kp.left_hip,      rh = kp.right_hip;
+    if (ok(ls) && ok(rs) && ok(lh) && ok(rh)) {
+      return { x: (ls.x + rs.x + lh.x + rh.x) / 4, y: (ls.y + rs.y + lh.y + rh.y) / 4 };
+    }
+    const sh = [ls, rs].filter(ok);
+    if (sh.length === 2) return avg(sh);
+    const hp = [lh, rh].filter(ok);
+    if (hp.length === 2) return avg(hp);
+    const headPt = getAimPoint(keypoints, 'head');
+    if (headPt) return { x: headPt.x, y: headPt.y + 60 };
+    return null;
+  }
+  if (part === 'leg') {
+    const lk = kp.left_knee,  rk = kp.right_knee;
+    const la = kp.left_ankle, ra = kp.right_ankle;
+    const knees = [lk, rk].filter(ok);
+    const ankles = [la, ra].filter(ok);
+    if (knees.length === 2 && ankles.length === 2) {
+      return { x: (lk.x + rk.x + la.x + ra.x) / 4, y: (lk.y + rk.y + la.y + ra.y) / 4 };
+    }
+    if (knees.length > 0) return avg(knees);
+    if (ankles.length > 0) return avg(ankles);
+    const hp = [kp.left_hip, kp.right_hip].filter(ok);
+    if (hp.length === 2) { const a = avg(hp); return { x: a.x, y: a.y + 80 }; }
+    return null;
+  }
+  return null;
+}
+
+function getBBox(keypoints) {
+  const valid = keypoints.filter(ok);
+  if (valid.length < 3) return null;
+  let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+  for (const k of valid) {
+    if (k.x < x1) x1 = k.x;
+    if (k.y < y1) y1 = k.y;
+    if (k.x > x2) x2 = k.x;
+    if (k.y > y2) y2 = k.y;
+  }
+  return { x1, y1, x2, y2, w: x2 - x1, h: y2 - y1 };
+}
+
+function computeScore(c, screenCx, screenCy) {
+  const distToCross = Math.hypot(c.aim.x - screenCx, c.aim.y - screenCy);
+  const diag = Math.hypot(screenCx, screenCy);
+  const distScore = 1 - Math.min(distToCross / diag, 1);
+  const lowScore = Math.min(c.bbox.y2 / (screenCy * 2), 1);
+  const maxArea = screenCx * screenCy * 0.5;
+  const sizeScore = Math.min(Math.sqrt(c.bbox.w * c.bbox.h) / Math.sqrt(maxArea), 1);
+  const kpScore = Math.min(c.validKpCount / 12, 1);
+  const score = distScore * 0.50 + lowScore * 0.20 + sizeScore * 0.20 + kpScore * 0.10;
+  return { score };
+}
+
+function inROI(point, roi) {
+  if (!roiEnabled) return true;
+  return point.x >= roi.x1 && point.x <= roi.x2 && point.y >= roi.y1 && point.y <= roi.y2;
+}
+
+function selectTarget(candidates, mode, screenCx, screenCy, roi) {
+  if (mode === 'locked' && lockedTrackId !== null) {
+    const locked = candidates.find(c => c.trackId === lockedTrackId);
+    if (locked) { lockedMissFrames = 0; lockAge++; return { target: locked, lockState: 'active' }; }
+    lockedMissFrames++;
+    if (lockedMissFrames > LOCK_TIMEOUT_FRAMES) {
+      lockedTrackId = null; lockedMissFrames = 0; lockAge = 0;
+    } else {
+      return { target: null, lockState: 'waiting' };
+    }
+  }
+  const eligible = roiEnabled ? candidates.filter(c => inROI(c.aim, roi)) : candidates.slice();
+  if (eligible.length === 0) return { target: null, lockState: 'off' };
+  for (const c of eligible) { c.score = computeScore(c, screenCx, screenCy).score; }
+  let selected;
+  switch (mode) {
+    case 'crosshair': eligible.sort((a, b) => a.distToCross - b.distToCross); selected = eligible[0]; break;
+    case 'lowest':    eligible.sort((a, b) => b.bbox.y2 - a.bbox.y2); selected = eligible[0]; break;
+    case 'largest':   eligible.sort((a, b) => (b.bbox.w * b.bbox.h) - (a.bbox.w * a.bbox.h)); selected = eligible[0]; break;
+    case 'locked':
+    case 'combo':
+    default:          eligible.sort((a, b) => b.score - a.score); selected = eligible[0]; break;
+  }
+  if (!selected) return { target: null, lockState: 'off' };
+  if (mode === 'locked' && selected.trackId !== null) {
+    lockedTrackId = selected.trackId;
+    lockedMissFrames = 0;
+    lockAge = 0;
+    return { target: selected, lockState: 'active' };
+  }
+  return { target: selected, lockState: 'off' };
+}
+
+async function loop() {
+  if (!running) return;
+  const now = performance.now();
+  const cw = overlay.width, ch = overlay.height;
+  const screenCx = cw / 2, screenCy = ch / 2;
+
+  const roiW = cw * roiPercent / 100;
+  const roiH = ch * roiPercent / 100;
+  const roi = { x1: (cw - roiW) / 2, y1: (ch - roiH) / 2, x2: (cw + roiW) / 2, y2: (ch + roiH) / 2 };
+
+  let poses = [];
+  try {
+    poses = await detector.estimatePoses(video, {
+      maxPoses: parseInt(maxPosesEl.value),
+      flipHorizontal: false
+    });
+  } catch (e) { }
+
+  ctx.clearRect(0, 0, cw, ch);
+  personCountEl.textContent = poses.length;
+
+  const part = aimPartEl.value;
+  const mode = targetModeEl.value;
+
+  const candidates = [];
+  for (const pose of poses) {
+    const bbox = getBBox(pose.keypoints);
+    if (!bbox) continue;
+    const aim = getAimPoint(pose.keypoints, part);
+    if (!aim) continue;
+    const validKpCount = pose.keypoints.filter(ok).length;
+    const distToCross = Math.hypot(aim.x - screenCx, aim.y - screenCy);
+    const trackId = (pose.id !== undefined && pose.id !== null) ? pose.id : null;
+    candidates.push({ aim, bbox, keypoints: pose.keypoints, validKpCount, distToCross, trackId, score: 0 });
+  }
+
+  ctx.fillStyle = 'rgba(79,195,247,0.45)';
+  for (const pose of poses) {
+    for (const k of pose.keypoints) {
+      if (ok(k)) ctx.fillRect(k.x - 1.5, k.y - 1.5, 3, 3);
+    }
+  }
+
+  if (roiEnabled) {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.fillRect(0, 0, cw, roi.y1);
+    ctx.fillRect(0, roi.y2, cw, ch - roi.y2);
+    ctx.fillRect(0, roi.y1, roi.x1, roiH);
+    ctx.fillRect(roi.x2, roi.y1, cw - roi.x2, roiH);
+  }
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]);
+  for (const c of candidates) ctx.strokeRect(c.bbox.x1, c.bbox.y1, c.bbox.w, c.bbox.h);
+  ctx.setLineDash([]);
+
+  if (roiEnabled) {
+    ctx.strokeStyle = 'rgba(255,82,82,0.85)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(roi.x1, roi.y1, roiW, roiH);
+    ctx.setLineDash([]);
+    const L = 10;
+    ctx.strokeStyle = 'rgba(255,82,82,1)';
+    ctx.beginPath();
+    ctx.moveTo(roi.x1, roi.y1 + L); ctx.lineTo(roi.x1, roi.y1); ctx.lineTo(roi.x1 + L, roi.y1);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(roi.x2 - L, roi.y1); ctx.lineTo(roi.x2, roi.y1); ctx.lineTo(roi.x2, roi.y1 + L);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(roi.x1, roi.y2 - L); ctx.lineTo(roi.x1, roi.y2); ctx.lineTo(roi.x1 + L, roi.y2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(roi.x2 - L, roi.y2); ctx.lineTo(roi.x2, roi.y2); ctx.lineTo(roi.x2, roi.y2 - L);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(255,82,82,0.85)';
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText('ROI ' + roiPercent + '%', roi.x1 + 4, roi.y1 + 11);
+  }
+
+  const result = selectTarget(candidates, mode, screenCx, screenCy, roi);
+  const target = result.target;
+
+  let roiCount = 0;
+  for (const c of candidates) if (!roiEnabled || inROI(c.aim, roi)) roiCount++;
+  roiCountEl.textContent = roiCount;
+
+  if (result.lockState === 'active') {
+    lockBadge.textContent = '已锁定 #' + lockedTrackId;
+    lockBadge.className = 'lock-badge active';
+  } else if (result.lockState === 'waiting') {
+    lockBadge.textContent = '等待目标... (' + lockedMissFrames + '/' + LOCK_TIMEOUT_FRAMES + ')';
+    lockBadge.className = 'lock-badge waiting';
+  } else {
+    lockBadge.textContent = '未锁定';
+    lockBadge.className = 'lock-badge off';
+  }
+
+  let dx = 0, dy = 0, hasTarget = 0;
+
+  if (target) {
+    hasTarget = 1;
+    dx = target.aim.x - screenCx;
+    dy = target.aim.y - screenCy;
+
+    ctx.strokeStyle = '#ffd54f';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(target.bbox.x1, target.bbox.y1, target.bbox.w, target.bbox.h);
+
+    ctx.fillStyle = '#7cff7c';
+    ctx.beginPath();
+    ctx.arc(target.aim.x, target.aim.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(255,213,79,0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(target.aim.x, target.aim.y);
+    ctx.lineTo(screenCx, screenCy);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = '#ffd54f';
+    ctx.font = 'bold 11px monospace';
+    const idLabel = target.trackId !== null ? ('#' + target.trackId) : '';
+    const scoreLabel = ' ' + target.score.toFixed(2);
+    ctx.fillText(idLabel + scoreLabel, target.bbox.x1, target.bbox.y1 - 4);
+
+    lockedIdEl.textContent = target.trackId !== null ? target.trackId : '-';
+    targetScoreEl.textContent = target.score.toFixed(3);
+    lockAgeEl.textContent = lockAge;
+  } else {
+    lockedIdEl.textContent = lockedTrackId !== null ? lockedTrackId : '-';
+    targetScoreEl.textContent = '-';
+    lockAgeEl.textContent = lockAge;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,82,82,0.85)';
+    ctx.font = 'bold 18px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('STOP', cw / 2, ch / 2 - 20);
+    ctx.restore();
+  }
+
+  if (hasTarget) {
+    smoothDx = smoothDx * SMOOTH_ALPHA + dx * (1 - SMOOTH_ALPHA);
+    smoothDy = smoothDy * SMOOTH_ALPHA + dy * (1 - SMOOTH_ALPHA);
+  } else {
+    smoothDx = 0;
+    smoothDy = 0;
+  }
+
+  dxEl.textContent = Math.round(smoothDx);
+  dyEl.textContent = Math.round(smoothDy);
+
+  const interval = 1000 / SEND_HZ;
+  if (now - lastSendTime >= interval) {
+    lastSendTime = now;
+    sendAim(smoothDx, smoothDy, hasTarget);
+  }
+
+  fpsCount++;
+  if (now - fpsTimer >= 1000) {
+    const fps = fpsCount;
+    fpsEl.textContent = fps;
+    fpsCount = 0;
+    fpsTimer = now;
+    if (fps < 8) {
+      warnBox.textContent = '⚠ ' + fps + ' FPS 偏低。建议：输入尺寸降到 128，最大人数改成 3，或改用 SinglePose';
+      warnBox.classList.add('show');
+    } else if (fps < 15) {
+      warnBox.textContent = '提示：' + fps + ' FPS 可用，若卡顿可降到 128';
+      warnBox.classList.add('show');
+    } else {
+      warnBox.classList.remove('show');
+    }
+  }
+
+  requestAnimationFrame(loop);
+}
+
+async function createDetector() {
+  const isMulti = (modelTypeEl.value === 'multi');
+  const inputSize = parseInt(inputSizeEl.value);
+  const config = {
+    modelType: isMulti
+      ? poseDetection.movenet.modelType.MULTIPOSE_LIGHTNING
+      : poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+    enableSmoothing: true
+  };
+  if (isMulti) {
+    config.multiPoseMaxDimension = inputSize;
+    config.enableTracking = true;
+    config.trackerType = poseDetection.TrackerType.BoundingBox;
+    try { config.trackerConfig = { maxTracks: parseInt(maxPosesEl.value) }; } catch (e) {}
+  }
+  return await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, config);
+}
+
+async function startAll() {
+  if (running) return;
+  if (!wsConnected) { alert('请先点"连接"'); return; }
+  btnStart.disabled = true;
+  btnStart.textContent = '加载模型...';
+  try {
+    if (detector) { try { detector.dispose(); } catch (e) {} detector = null; }
+    detector = await createDetector();
+    if (!videoStream) await startCamera();
+    lockedTrackId = null;
+    lockedMissFrames = 0;
+    lockAge = 0;
+    running = true;
+    fpsTimer = performance.now();
+    fpsCount = 0;
+    btnStart.textContent = '运行中...';
+    loop();
+  } catch (err) {
+    console.error(err);
+    alert('启动失败：' + err.message);
+    btnStart.disabled = false;
+    btnStart.textContent = '启动摄像头 + 检测';
+    running = false;
+  }
+}
+
+function stopAll() {
+  running = false;
+  btnStart.disabled = false;
+  btnStart.textContent = '启动摄像头 + 检测';
+  if (videoStream) {
+    videoStream.getTracks().forEach(t => t.stop());
+    videoStream = null;
+  }
+  video.srcObject = null;
+  ctx.clearRect(0, 0, overlay.width, overlay.height);
+  personCountEl.textContent = '0';
+  roiCountEl.textContent = '0';
+  fpsEl.textContent = '0';
+  lockedTrackId = null;
+  lockedMissFrames = 0;
+  lockAge = 0;
+}
+
+function resetLock() {
+  lockedTrackId = null;
+  lockedMissFrames = 0;
+  lockAge = 0;
+  lockBadge.textContent = '未锁定';
+  lockBadge.className = 'lock-badge off';
+}
+
+btnConnect.addEventListener('click', connectWs);
+btnStart.addEventListener('click', startAll);
+btnStop.addEventListener('click', stopAll);
+btnResetLock.addEventListener('click', resetLock);
+
+roiEnabledEl.addEventListener('change', () => {
+  roiEnabled = roiEnabledEl.checked;
+  updateRoiInfo();
+});
+roiPercentEl.addEventListener('input', () => {
+  roiPercent = parseInt(roiPercentEl.value);
+  roiPercentValEl.textContent = roiPercent + '%';
+  updateRoiInfo();
+});
+function updateRoiInfo() {
+  roiInfoEl.textContent = roiEnabled ? ('中央 ' + roiPercent + '%') : '已禁用';
+}
+
+[modelTypeEl, inputSizeEl, maxPosesEl].forEach(el => {
+  el.addEventListener('change', () => {
+    if (running) {
+      warnBox.textContent = '设置已改，请点"停止"再"启动"生效';
+      warnBox.classList.add('show');
+    }
+  });
+});
+targetModeEl.addEventListener('change', resetLock);
+
+const savedIp = localStorage.getItem('espIp');
+if (savedIp) espIpEl.value = savedIp;
+espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.value));
+
+['modelType', 'inputSize', 'maxPoses', 'aimPart', 'targetMode'].forEach(id => {
+  const el = document.getElementById(id);
+  const saved = localStorage.getItem('pref_' + id);
+  if (saved !== null && el) el.value = saved;
+  if (el) el.addEventListener('change', () => localStorage.setItem('pref_' + id, el.value));
+});
+['roiEnabled', 'roiPercent'].forEach(id => {
+  const el = document.getElementById(id);
+  const saved = localStorage.getItem('pref_' + id);
+  if (saved !== null && el) {
+    if (el.type === 'checkbox') el.checked = (saved === 'true');
+    else el.value = saved;
+  }
+  if (el) el.addEventListener('change', () => localStorage.setItem('pref_' + id, el.value));
+});
+
+roiEnabled = roiEnabledEl.checked;
+roiPercent = parseInt(roiPercentEl.value);
+roiPercentValEl.textContent = roiPercent + '%';
+updateRoiInfo();
+</script>
+</body>
+</html>
