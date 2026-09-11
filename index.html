@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v28</title>
+<title>视觉跟随 · v30</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -61,11 +61,16 @@
   .dir-box .group-label { color: #ffb74d; font-size: 0.65rem; margin-bottom: 3px; }
   .hint { font-size: 0.62rem; color: #9bc4e2; line-height: 1.4; background: #0a1626; padding: 4px 6px; border-radius: 3px; margin-top: 4px; }
   .hint b { color: #ffd54f; }
+  .brake-box { background: #0a2a0a; border: 1px solid #7cff7c; border-radius: 4px; padding: 5px 8px; margin-top: 4px; }
+  .brake-box .group-label { color: #7cff7c; font-size: 0.65rem; margin-bottom: 3px; }
+  .speed-table { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2px; font-size: 0.6rem; font-family: monospace; color: #cde4f7; margin-top: 4px; }
+  .speed-table span { background: #0a1626; padding: 2px 4px; border-radius: 3px; text-align: center; }
+  .speed-table span.hdr { color: #7cff7c; font-weight: bold; }
 </style>
 </head>
 <body>
 
-<h1>视觉跟随 · v28</h1>
+<h1>视觉跟随 · v30</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -120,10 +125,42 @@
       <option value="0.80">瞬间（0.80）</option>
     </select>
   </div>
-  <div class="row">
+
+  <div class="brake-box">
+    <div class="group-label">★ 防过冲刹车（v30 全档位生效）</div>
+    <div class="row">
+      <label>刹车距离</label>
+      <input type="number" id="brakeDistance" min="0" max="300" step="5" value="60">
+      <span class="roi-info">px（基准）</span>
+    </div>
+    <div class="row">
+      <label>停止半径</label>
+      <input type="number" id="stopDistance" min="0" max="80" step="1" value="10">
+      <span class="roi-info">px（基准）</span>
+    </div>
+    <div class="hint">
+      <b>全档位自动缩放（v30）：</b>刹车距离和停止半径会随速度档位自动放大或缩小。<br>
+      不管选慢速、中速还是瞬间，都能提前减速并精准停在目标处，不再只有极快/瞬间才生效。
+    </div>
+    <div class="speed-table">
+      <span class="hdr">档位</span><span class="hdr">刹车倍率</span><span class="hdr">停止倍率</span>
+      <span>慢 0.05</span><span>0.5×</span><span>0.7×</span>
+      <span>中 0.10</span><span>0.75×</span><span>0.85×</span>
+      <span>快 0.20</span><span>1.0×</span><span>1.0×</span>
+      <span>很快 0.35</span><span>1.5×</span><span>1.15×</span>
+      <span>极快 0.50</span><span>2.0×</span><span>1.3×</span>
+      <span>瞬间 0.80</span><span>3.0×</span><span>1.5×</span>
+    </div>
+    <div class="hint" style="margin-top:4px;">
+      <b>实际刹车 / 停止（当前档位）：</b><br>
+      刹车区 = 基准刹车 × 倍率　|　停止区 = 基准停止 × 倍率
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:6px;">
     <label>死区</label>
     <select id="deadZone">
-      <option value="0" selected>0 px（瞬间模式推荐）</option>
+      <option value="0" selected>0 px（配合刹车使用）</option>
       <option value="3">3 px</option>
       <option value="5">5 px</option>
       <option value="8">8 px</option>
@@ -131,14 +168,8 @@
   </div>
   <div class="hint">
     <b>死区是什么？</b>当目标离准星的距离小于死区值时，就认为"已经对齐"，不再输出移动指令。<br>
-    · <b>死区越小</b>（如 0px）：对准越精确，但接近目标时可能反复微抖（振荡）。<br>
-    · <b>死区越大</b>（如 8px）：画面更稳，但可能停在离准星还有一点距离的地方。<br>
-    · 想"瞬间到位"，把死区设为 0，速度设为"瞬间"。
-  </div>
-  <div class="hint">
-    <b>到位停稳（v28 改进）：</b>采用"渐进阻尼 + 硬停止"，越接近目标输出越小，进入 <b>5px</b> 内直接输出 0，像锁死一样稳。<br>
-    · 不再使用多帧计数和迟滞状态机，避免状态反复切换导致的抖动。<br>
-    · 若感觉接近目标时减速太早，可把死区改成 3px 让它停得远一点。
+    · 与"停止半径"的区别：死区是固定值，停止半径会随速度自动缩放。<br>
+    · 一般情况下，把死区设为 0，用"刹车距离 + 停止半径"来控制更灵活。
   </div>
 
   <div class="sec-title">检测设置</div>
@@ -240,6 +271,14 @@
   <div class="stat" style="margin-top:4px;">
     <span>dx: <b id="dx">0</b></span>
     <span>dy: <b id="dy">0</b></span>
+    <span>距离: <b id="dist">-</b></span>
+  </div>
+  <div class="stat" style="margin-top:4px;">
+    <span>刹车区: <b id="brakeZone">-</b></span>
+    <span>停止区: <b id="stopZone">-</b></span>
+    <span>档位倍率: <b id="speedMulShow">-</b></span>
+  </div>
+  <div class="stat" style="margin-top:4px;">
     <span>原始: <b id="lockedId">-</b></span>
   </div>
 
@@ -330,14 +369,12 @@ const MIN_SEND = 1;
 const STILL_DAMPING = 0.4;
 let STILL_THRESHOLD = 30;
 const MOVING_BOOST = 2.0;
-
-// ★★★ v28 核心：加强瞄准点低通滤波，抑制检测抖动
-const AIM_SMOOTH_ALPHA = 0.82;  // 越大越平滑（原 0.7），对抖动抑制更强
+const AIM_SMOOTH_ALPHA = 0.82;
 const LOCK_TIMEOUT_FRAMES = 20;
 
-// ★★★ v28 核心：渐进阻尼 + 硬停止
-const STOP_RADIUS = 5;    // 距离目标小于此值直接输出 0，像锁死
-const SOFT_RADIUS = 35;   // 距离目标小于此值开始线性降低增益（渐进阻尼）
+// ★★★ v30：刹车基准参数（全档位生效）
+let brakeDistance = 60;    // 刹车距离基准（像素）
+let stopDistance  = 10;    // 停止半径基准（像素）
 
 // 离屏推理 canvas
 const inferCanvas = document.createElement('canvas');
@@ -345,7 +382,6 @@ const inferCtx = inferCanvas.getContext('2d');
 const MAX_INFER_W = 640;
 const MIN_INFER_W = 320;
 
-// 方向开关（默认：X 正转，Y 正转）
 let DIR_X_FLIP = false;
 let DIR_Y_FLIP = false;
 
@@ -401,6 +437,10 @@ const videoFpsEl = document.getElementById('videoFps');
 const sentEl = document.getElementById('sent');
 const dxEl = document.getElementById('dx');
 const dyEl = document.getElementById('dy');
+const distEl = document.getElementById('dist');
+const brakeZoneEl = document.getElementById('brakeZone');
+const stopZoneEl = document.getElementById('stopZone');
+const speedMulShowEl = document.getElementById('speedMulShow');
 const lockedIdEl = document.getElementById('lockedId');
 const lockBadge = document.getElementById('lockBadge');
 const arriveBadge = document.getElementById('arriveBadge');
@@ -418,6 +458,8 @@ const camResEl = document.getElementById('camRes');
 const camFacingEl = document.getElementById('camFacing');
 const moveSpeedEl = document.getElementById('moveSpeed');
 const deadZoneEl = document.getElementById('deadZone');
+const brakeDistanceEl = document.getElementById('brakeDistance');
+const stopDistanceEl = document.getElementById('stopDistance');
 const dirXFlipEl = document.getElementById('dirXFlip');
 const dirYFlipEl = document.getElementById('dirYFlip');
 const roiEnabledEl = document.getElementById('roiEnabled');
@@ -443,6 +485,38 @@ function setLibStatus(msg, cls) { libStatusEl.textContent = msg; libStatusEl.cla
 function updateSpeedParams() {
   MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.20;
   MAX_MOVE_PER_FRAME = Math.min(240, Math.max(25, MOVE_GAIN * 300));
+}
+
+function updateBrakeParams() {
+  brakeDistance = parseInt(brakeDistanceEl.value) || 0;
+  if (brakeDistance < 0) brakeDistance = 0;
+  if (brakeDistance > 300) brakeDistance = 300;
+  stopDistance = parseInt(stopDistanceEl.value) || 0;
+  if (stopDistance < 0) stopDistance = 0;
+  if (stopDistance > 80) stopDistance = 80;
+  if (stopDistance >= brakeDistance && brakeDistance > 0) {
+    stopDistance = Math.max(1, brakeDistance - 5);
+    stopDistanceEl.value = stopDistance;
+  }
+}
+
+// ★★★ v30 核心：档位明确映射，每档都有独立的刹车/停止倍率
+// 返回 {brake, stop, label}
+function getSpeedScale() {
+  const g = MOVE_GAIN;
+  if (g <= 0.05) return { brake: 0.50, stop: 0.70, label: '慢 0.5×/0.7×' };
+  if (g <= 0.10) return { brake: 0.75, stop: 0.85, label: '中 0.75×/0.85×' };
+  if (g <= 0.20) return { brake: 1.00, stop: 1.00, label: '快 1.0×/1.0×' };
+  if (g <= 0.35) return { brake: 1.50, stop: 1.15, label: '很快 1.5×/1.15×' };
+  if (g <= 0.50) return { brake: 2.00, stop: 1.30, label: '极快 2.0×/1.3×' };
+  return { brake: 3.00, stop: 1.50, label: '瞬间 3.0×/1.5×' };
+}
+
+function getEffectiveBrake() {
+  return brakeDistance * getSpeedScale().brake;
+}
+function getEffectiveStop() {
+  return stopDistance * getSpeedScale().stop;
 }
 
 function updateMirror() {
@@ -834,42 +908,49 @@ function renderLoop() {
     if (DIR_Y_FLIP) dy = -dy;
   }
 
-  // ★★★ v28 核心：渐进阻尼 + 硬停止
+  // ★★★ v30 核心：全档位刹车 + 反过冲钳制
+  const scale = getSpeedScale();
+  const effBrake = brakeDistance * scale.brake;
+  const effStop  = stopDistance * scale.stop;
+
   let sendDx = 0, sendDy = 0;
   let stopped = false;
+
   if (hasTarget) {
     const dist = Math.hypot(dx, dy);
 
-    if (dist < STOP_RADIUS) {
-      // 进入极小半径：直接锁死，不再输出任何移动
-      sendDx = 0; sendDy = 0;
+    // 死区优先（用户明确设置的固定死区）
+    if (DEAD_ZONE > 0 && dist < DEAD_ZONE) {
       stopped = true;
-    } else if (dist < DEAD_ZONE) {
-      // 死区（若用户设置了大于 0 的死区）
-      sendDx = 0; sendDy = 0;
+    } else if (dist < effStop) {
+      // 进入停止半径：直接锁死
       stopped = true;
     } else {
-      // 渐进阻尼因子：距离越近，输出越小，平滑过渡到 0
-      let distFactor = 1;
-      if (dist < SOFT_RADIUS) {
-        distFactor = (dist - STOP_RADIUS) / (SOFT_RADIUS - STOP_RADIUS);
-        if (distFactor < 0) distFactor = 0;
-        if (distFactor > 1) distFactor = 1;
+      // 渐进阻尼：进入刹车区后按 t² 曲线衰减
+      let gainMul = 1;
+      if (dist < effBrake && effBrake > effStop) {
+        let t = (dist - effStop) / (effBrake - effStop);
+        t = Math.max(0, Math.min(1, t));
+        t = t * t;  // 二次缓出
+        gainMul = t;
       }
 
-      let rawDx = dx * adaptiveGain * distFactor;
-      let rawDy = dy * adaptiveGain * distFactor;
+      let rawDx = dx * adaptiveGain * gainMul;
+      let rawDy = dy * adaptiveGain * gainMul;
 
-      // 保底最小步进（避免极慢速时完全不动）
-      if (Math.abs(rawDx) > 0.01 && Math.abs(rawDx) < MIN_SEND) rawDx = (rawDx > 0 ? MIN_SEND : -MIN_SEND);
-      if (Math.abs(rawDy) > 0.01 && Math.abs(rawDy) < MIN_SEND) rawDy = (rawDy > 0 ? MIN_SEND : -MIN_SEND);
+      // 反过冲钳制：每帧移动量绝不超过 (剩余距离 - 停止半径)
+      const maxMove = Math.min(MAX_MOVE_PER_FRAME, Math.max(MIN_SEND, dist - effStop));
+      sendDx = Math.max(-maxMove, Math.min(maxMove, rawDx));
+      sendDy = Math.max(-maxMove, Math.min(maxMove, rawDy));
 
-      sendDx = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, rawDx));
-      sendDy = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, rawDy));
+      // 保底最小步进：只有在还有明显距离时才应用，避免抖动
+      if (dist - effStop > MIN_SEND * 2) {
+        if (Math.abs(rawDx) > 0.3 && Math.abs(sendDx) < MIN_SEND) sendDx = sendDx >= 0 ? MIN_SEND : -MIN_SEND;
+        if (Math.abs(rawDy) > 0.3 && Math.abs(sendDy) < MIN_SEND) sendDy = sendDy >= 0 ? MIN_SEND : -MIN_SEND;
+      }
     }
   }
 
-  // 更新停稳徽章
   if (hasTarget && stopped) {
     arriveBadge.textContent = '已停稳';
     arriveBadge.className = 'lock-badge arrive';
@@ -883,6 +964,17 @@ function renderLoop() {
 
   dxEl.textContent = Math.round(sendDx);
   dyEl.textContent = Math.round(sendDy);
+
+  if (hasTarget) {
+    const distShow = Math.hypot(targetAimX - screenCx, targetAimY - screenCy);
+    distEl.textContent = Math.round(distShow);
+  } else {
+    distEl.textContent = '-';
+  }
+  brakeZoneEl.textContent = Math.round(effBrake);
+  stopZoneEl.textContent = Math.round(effStop);
+  speedMulShowEl.textContent = scale.label;
+
   lockedIdEl.textContent = hasTarget
     ? ('X=' + Math.round(targetAimX - screenCx) + ' Y=' + Math.round(targetAimY - screenCy))
     : '-';
@@ -946,6 +1038,27 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.fillStyle = 'rgba(255,82,82,0.85)';
     ctx.font = 'bold 10px monospace';
     drawText('ROI ' + roiPercent + '%', roi.x1 + 4, roi.y1 + 11);
+  }
+
+  // ★ 绘制当前档位下的刹车区 / 停止区参考圆
+  if (latestPersons.length > 0) {
+    const scale = getSpeedScale();
+    const effBrake = brakeDistance * scale.brake;
+    const effStop  = stopDistance * scale.stop;
+    ctx.setLineDash([4, 4]);
+    // 刹车区（绿色）
+    ctx.strokeStyle = 'rgba(124, 255, 124, 0.45)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(screenCx, screenCy, effBrake, 0, Math.PI * 2);
+    ctx.stroke();
+    // 停止区（蓝色）
+    ctx.strokeStyle = 'rgba(79, 195, 247, 0.7)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(screenCx, screenCy, effStop, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
 
   const mode = targetModeEl.value;
@@ -1033,6 +1146,7 @@ async function startAll() {
 
     INFER_HZ = parseInt(inferHzEl.value) || 8;
     updateSpeedParams();
+    updateBrakeParams();
     DEAD_ZONE = parseFloat(deadZoneEl.value) || 0;
     DIR_X_FLIP = (dirXFlipEl.value === 'invert');
     DIR_Y_FLIP = (dirYFlipEl.value === 'invert');
@@ -1068,7 +1182,7 @@ function stopAll() {
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   personCountEl.textContent = '0'; roiCountEl.textContent = '0';
   fpsEl.textContent = '0'; videoFpsEl.textContent = '0'; inferFpsEl.textContent = '0';
-  dxEl.textContent = '0'; dyEl.textContent = '0';
+  dxEl.textContent = '0'; dyEl.textContent = '0'; distEl.textContent = '-';
   latestPersons = []; lockedBox = null; lockedMissFrames = 0; lockAge = 0;
   aimInitialized = false; targetSpeed = 0;
   vstatusEl.textContent = '已停止'; vstatusEl.style.color = '#ffb74d';
@@ -1123,11 +1237,26 @@ dirYFlipEl.addEventListener('change', () => {
 moveSpeedEl.addEventListener('change', () => {
   updateSpeedParams();
   if (running) {
-    showInfo('速度改为 ' + MOVE_GAIN + '（每帧上限 ' + MAX_MOVE_PER_FRAME + '）');
-    setTimeout(hideWarn, 1500);
+    const s = getSpeedScale();
+    showInfo('速度改为 ' + MOVE_GAIN + '（' + s.label + '）');
+    setTimeout(hideWarn, 2000);
   }
   localStorage.setItem('pref_moveSpeed', moveSpeedEl.value);
 });
+
+brakeDistanceEl.addEventListener('change', () => {
+  updateBrakeParams();
+  if (running) showInfo('刹车距离基准改为 ' + brakeDistance + ' px');
+  setTimeout(hideWarn, 1500);
+  localStorage.setItem('pref_brakeDistance', brakeDistanceEl.value);
+});
+stopDistanceEl.addEventListener('change', () => {
+  updateBrakeParams();
+  if (running) showInfo('停止半径基准改为 ' + stopDistance + ' px');
+  setTimeout(hideWarn, 1500);
+  localStorage.setItem('pref_stopDistance', stopDistanceEl.value);
+});
+
 deadZoneEl.addEventListener('change', () => {
   DEAD_ZONE = parseFloat(deadZoneEl.value) || 0;
   if (running) { showInfo('死区改为 ' + DEAD_ZONE + ' px'); setTimeout(hideWarn, 1500); }
@@ -1162,7 +1291,8 @@ const savedIp = localStorage.getItem('espIp');
 if (savedIp) espIpEl.value = savedIp;
 espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.value));
 
-['aimPart', 'targetMode', 'inferHz', 'minScore', 'maxPoses', 'moveSpeed', 'deadZone', 'dirXFlip', 'dirYFlip'].forEach(id => {
+['aimPart', 'targetMode', 'inferHz', 'minScore', 'maxPoses', 'moveSpeed', 'deadZone',
+ 'brakeDistance', 'stopDistance', 'dirXFlip', 'dirYFlip'].forEach(id => {
   const el = document.getElementById(id);
   const saved = localStorage.getItem('pref_' + id);
   if (saved !== null && el) el.value = saved;
@@ -1186,6 +1316,7 @@ roiEnabled = roiEnabledEl.checked;
 roiPercent = parseInt(roiPercentEl.value);
 INFER_HZ = parseInt(inferHzEl.value) || 8;
 updateSpeedParams();
+updateBrakeParams();
 DEAD_ZONE = parseFloat(deadZoneEl.value) || 0;
 DIR_X_FLIP = (dirXFlipEl.value === 'invert');
 DIR_Y_FLIP = (dirYFlipEl.value === 'invert');
