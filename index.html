@@ -3,20 +3,21 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · 流畅版 v5</title>
+<title>视觉跟随 · 流畅版 v6</title>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
   h1 { font-size: 1rem; margin: 6px 0; color: #4fc3f7; }
-  .video-wrap { position: relative; width: 100%; max-width: 480px; border: 2px solid #4fc3f7; border-radius: 6px; overflow: hidden; background: #000; }
-  video#video { width: 100%; display: block; }
+  .video-wrap { position: relative; width: 100%; max-width: 480px; aspect-ratio: 16/9; border: 2px solid #4fc3f7; border-radius: 6px; overflow: hidden; background: #000; }
+  video#video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
   canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
   .crosshair { position: absolute; top: 50%; left: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; z-index: 3; }
   .crosshair::before, .crosshair::after { content: ''; position: absolute; background: #ffd54f; box-shadow: 0 0 3px #000; }
   .crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
   .crosshair::after { top: 10px; left: 0; width: 22px; height: 2px; }
+  .video-wrap .vstatus { position: absolute; left: 4px; bottom: 4px; background: rgba(0,0,0,0.6); color: #7cff7c; font-family: monospace; font-size: 0.62rem; padding: 2px 5px; border-radius: 3px; z-index: 4; pointer-events: none; }
   .panel { width: 100%; max-width: 480px; margin-top: 8px; background: #16213e; border-radius: 6px; padding: 8px; }
   .row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 0.82rem; flex-wrap: wrap; }
   .row label { flex: 0 0 auto; color: #9bc4e2; font-size: 0.75rem; min-width: 58px; }
@@ -28,6 +29,7 @@
   button:disabled { opacity: 0.5; cursor: not-allowed; }
   button.danger { background: #ff5252; color: #fff; }
   button.warn { background: #ffb74d; color: #000; }
+  button.ghost { background: transparent; color: #4fc3f7; border: 1px solid #4fc3f7; }
   .status { font-size: 0.75rem; color: #9bc4e2; }
   .status.ok { color: #7cff7c; }
   .status.err { color: #ff5252; }
@@ -59,12 +61,13 @@
 </head>
 <body>
 
-<h1>视觉跟随 · 流畅版 v5</h1>
+<h1>视觉跟随 · 流畅版 v6</h1>
 
 <div class="video-wrap">
   <video id="video" autoplay playsinline muted></video>
   <canvas id="overlay"></canvas>
   <div class="crosshair"></div>
+  <div class="vstatus" id="vstatus">未启动</div>
 </div>
 
 <div class="panel">
@@ -90,6 +93,7 @@
       <option value="720">1280×720 @ 30fps（清晰）</option>
       <option value="1080">1920×1080 @ 30fps（最清晰）</option>
     </select>
+    <button id="btnReopen" class="ghost" style="flex:0 0 auto; padding:4px 8px; font-size:0.7rem;">重开</button>
   </div>
   <div class="row">
     <label>模型</label>
@@ -269,6 +273,7 @@ const btnConnect = document.getElementById('btnConnect');
 const btnStart = document.getElementById('btnStart');
 const btnStop = document.getElementById('btnStop');
 const btnResetLock = document.getElementById('btnResetLock');
+const btnReopen = document.getElementById('btnReopen');
 const aimPartEl = document.getElementById('aimPart');
 const targetModeEl = document.getElementById('targetMode');
 const modelTypeEl = document.getElementById('modelType');
@@ -286,6 +291,20 @@ const inferFpsEl = document.getElementById('inferFps');
 const tfBackendEl = document.getElementById('tfBackend');
 const canvasInfoEl = document.getElementById('canvasInfo');
 const camResInfoEl = document.getElementById('camResInfo');
+const vstatusEl = document.getElementById('vstatus');
+
+// ============ 工具 ============
+function showError(msg) {
+  warnBox.textContent = msg;
+  warnBox.className = 'warn-box show err';
+}
+function showInfo(msg) {
+  warnBox.textContent = msg;
+  warnBox.className = 'warn-box show';
+}
+function hideWarn() {
+  warnBox.className = 'warn-box';
+}
 
 // ============ WebSocket ============
 function connectWs() {
@@ -324,7 +343,7 @@ function sendAim(dx, dy, hasTarget) {
   sentEl.textContent = sentCount;
 }
 
-// ============ 摄像头（ideal 软约束 + 单 video）============
+// ============ 摄像头（三级 fallback，健壮版）============
 async function startCamera() {
   const res = camResEl.value;
   let w, h;
@@ -334,24 +353,99 @@ async function startCamera() {
   else if (res === '1080') { w = 1920; h = 1080; }
   else                     { w = 1280; h = 720;  }
 
-  // ★ 关键：用 ideal 而非 exact，frameRate 用 min/max 给浏览器弹性
-  const constraints = {
-    width:     { ideal: w },
-    height:    { ideal: h },
-    frameRate: { ideal: 30, min: 15, max: 30 },
-    facingMode: { ideal: 'environment' }
-  };
-
+  // 先关旧流
   if (videoStream) {
-    videoStream.getTracks().forEach(t => t.stop());
+    try { videoStream.getTracks().forEach(t => t.stop()); } catch (e) {}
     videoStream = null;
   }
+  video.srcObject = null;
+  vstatusEl.textContent = '正在打开摄像头...';
+  vstatusEl.style.color = '#ffb74d';
 
-  videoStream = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
+  // ★ 三级尝试，从严格到宽松
+  const tryGet = async (constraints, label) => {
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
+      console.log('[Camera]', label, 'OK', JSON.stringify(s.getVideoTracks()[0].getSettings()));
+      return s;
+    } catch (e) {
+      console.warn('[Camera]', label, 'FAIL:', e.name, e.message);
+      return null;
+    }
+  };
 
-  // ★ 只给主 video，不用 inferVideo（排除共享流的 bug）
-  video.srcObject = videoStream;
-  await video.play();
+  let stream = null;
+
+  // 尝试 1：宽高 + 帧率 + 后置
+  stream = await tryGet({
+    width: { ideal: w },
+    height: { ideal: h },
+    frameRate: { ideal: 30 },
+    facingMode: { ideal: 'environment' }
+  }, '尝试1 ideal ' + w + 'x' + h + ' 30fps env');
+
+  // 尝试 2：只宽高
+  if (!stream) {
+    stream = await tryGet({
+      width: { ideal: w },
+      height: { ideal: h }
+    }, '尝试2 ideal ' + w + 'x' + h);
+  }
+
+  // 尝试 3：只要后置
+  if (!stream) {
+    stream = await tryGet({ facingMode: 'environment' }, '尝试3 env only');
+  }
+
+  // 尝试 4：任意
+  if (!stream) {
+    stream = await tryGet(true, '尝试4 any');
+  }
+
+  if (!stream) {
+    vstatusEl.textContent = '摄像头打开失败';
+    vstatusEl.style.color = '#ff5252';
+    showError('无法打开摄像头。请检查：① 浏览器是否允许了摄像头权限（地址栏🔒 → 网站设置）② 有没有其它 App 占用摄像头（关掉微信/抖音/相机）③ 换个浏览器（推荐 Chrome 或 Edge）');
+    throw new Error('camera failed');
+  }
+
+  videoStream = stream;
+  video.srcObject = stream;
+
+  // 播放（兼容不同浏览器）
+  try {
+    await video.play();
+  } catch (e) {
+    console.warn('video.play() failed:', e);
+    // 再试一次
+    try { await video.play(); } catch (e2) { console.warn('retry play failed', e2); }
+  }
+
+  // 等元数据就绪
+  if (video.videoWidth === 0) {
+    await new Promise(resolve => {
+      let done = false;
+      const check = () => {
+        if (done) return;
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
+          done = true;
+          resolve();
+        } else {
+          setTimeout(check, 100);
+        }
+      };
+      video.addEventListener('loadedmetadata', () => { if (!done) { done = true; resolve(); } });
+      setTimeout(() => { if (!done) { done = true; resolve(); } }, 2000);
+      check();
+    });
+  }
+
+  if (video.videoWidth === 0) {
+    vstatusEl.textContent = '摄像头无画面';
+    vstatusEl.style.color = '#ff5252';
+    showError('摄像头打开了但没有画面。可能原因：① 摄像头被其它 App 占用 ② 换个分辨率试试 ③ 换浏览器');
+    return;
+  }
 
   applyCanvasSize();
 
@@ -360,6 +454,9 @@ async function startCamera() {
 
   camResInfoEl.textContent = video.videoWidth + '×' + video.videoHeight;
   canvasInfoEl.textContent = overlay.width + '×' + overlay.height;
+
+  vstatusEl.textContent = video.videoWidth + '×' + video.videoHeight + ' @ ' + (video.getVideoPlaybackQuality ? 'live' : '');
+  vstatusEl.style.color = '#7cff7c';
 
   startVideoFpsMonitor();
 }
@@ -376,9 +473,9 @@ function applyCanvasSize() {
   }
 }
 
-// ★ 摄像头真实帧率监测
+// 摄像头真实帧率监测
 function startVideoFpsMonitor() {
-  if (videoFpsRunning) return;
+  videoFpsRunning = false;
   if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype)) {
     videoFpsEl.textContent = 'N/A';
     videoFpsEl.className = 'warn';
@@ -394,7 +491,7 @@ function startVideoFpsMonitor() {
     if (now - videoFpsTimer >= 1000) {
       const f = videoFpsCount;
       videoFpsEl.textContent = f;
-      videoFpsEl.className = (f < 20) ? 'bad' : (f < 25) ? 'warn' : '';
+      videoFpsEl.className = (f < 15) ? 'bad' : (f < 25) ? 'warn' : '';
       videoFpsCount = 0;
       videoFpsTimer = now;
     }
@@ -524,19 +621,23 @@ function selectTarget(candidates, mode, screenCx, screenCy, roi) {
   return { target: selected, lockState: 'off' };
 }
 
-// ============ 推理循环（读主 video）============
+// ============ 推理循环 ============
 async function detectLoop() {
   while (running) {
     const t0 = performance.now();
     try {
-      const poses = await detector.estimatePoses(video, {
-        maxPoses: parseInt(maxPosesEl.value),
-        flipHorizontal: false
-      });
-      latestPoses = poses;
-      latestPosesTime = performance.now();
-      inferCount++;
-    } catch (e) {}
+      if (video.readyState >= 2 && video.videoWidth > 0) {
+        const poses = await detector.estimatePoses(video, {
+          maxPoses: parseInt(maxPosesEl.value),
+          flipHorizontal: false
+        });
+        latestPoses = poses;
+        latestPosesTime = performance.now();
+        inferCount++;
+      }
+    } catch (e) {
+      console.warn('detect err', e);
+    }
 
     const now = performance.now();
     if (now - inferTimer >= 1000) {
@@ -559,9 +660,9 @@ function renderLoop() {
   const cw = overlay.width, ch = overlay.height;
   const screenCx = cw / 2, screenCy = ch / 2;
 
-  const needRedraw = (latestPosesTime !== lastDrawnPosesTime);
-  if (needRedraw) {
-    lastDrawnPosesTime = latestPosesTime;
+  // ★ 首次进入时画一次（清掉黑屏）
+  if (lastDrawnPosesTime !== latestPosesTime || lastDrawnPosesTime === 0) {
+    lastDrawnPosesTime = latestPosesTime || now;
     drawOverlay(cw, ch, screenCx, screenCy);
   }
 
@@ -628,10 +729,12 @@ function renderLoop() {
     const backend = tf.getBackend ? tf.getBackend() : '?';
 
     let diag = null;
-    if (backend !== 'webgl' && backend !== 'webgpu') {
+    if (video.videoWidth === 0) {
+      diag = '⚠ 摄像头没有画面。请点"重开"按钮，或检查是否有其它 App 占用摄像头。';
+    } else if (backend !== 'webgl' && backend !== 'webgpu') {
       diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）—— 推理会阻塞主线程！换 Chrome 或换设备。';
-    } else if (vidFps > 0 && vidFps < 18) {
-      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 是摄像头慢。请关闭其它占用摄像头的 App，或换 Chrome 浏览器。若仍慢，手机摄像头本身性能有限。';
+    } else if (vidFps > 0 && vidFps < 15) {
+      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 换更低分辨率（320×240），或换 Chrome，或关闭其它占用摄像头的 App。';
     } else if (fps < 30) {
       diag = '⚠ rAF 只有 ' + fps + ' fps —— 把推理频率降到 6Hz 或画布降一档';
     } else if (infFps < 5 && INFER_HZ >= 8) {
@@ -742,6 +845,8 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.font = 'bold 11px monospace';
     const idLabel = target.trackId !== null ? ('#' + target.trackId) : '';
     ctx.fillText(idLabel, target.bbox.x1, target.bbox.y1 - 4);
+  } else if (poses.length === 0) {
+    // 没有人物时不画 STOP（避免看起来像黑屏）
   } else {
     ctx.save();
     ctx.fillStyle = 'rgba(255,82,82,0.85)';
@@ -752,7 +857,7 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
   }
 }
 
-// ============ 创建检测器（强制 WebGL）============
+// ============ 创建检测器 ============
 async function createDetector() {
   try {
     await tf.setBackend('webgl');
@@ -787,6 +892,8 @@ async function startAll() {
   if (!wsConnected) { alert('请先点"连接"'); return; }
   btnStart.disabled = true;
   btnStart.textContent = '加载模型...';
+  hideWarn();
+
   try {
     if (detector) { try { detector.dispose(); } catch (e) {} detector = null; }
 
@@ -794,8 +901,17 @@ async function startAll() {
     CANVAS_HEIGHT = parseInt(canvasSizeEl.value) || 360;
 
     detector = await createDetector();
-    if (!videoStream) await startCamera();
-    else applyCanvasSize();
+    if (!videoStream) {
+      try {
+        await startCamera();
+      } catch (e) {
+        btnStart.disabled = false;
+        btnStart.textContent = '启动';
+        return;
+      }
+    } else {
+      applyCanvasSize();
+    }
 
     lockedTrackId = null;
     lockedMissFrames = 0;
@@ -814,7 +930,7 @@ async function startAll() {
     renderLoop();
   } catch (err) {
     console.error(err);
-    alert('启动失败：' + err.message);
+    showError('启动失败：' + err.message);
     btnStart.disabled = false;
     btnStart.textContent = '启动';
     running = false;
@@ -827,7 +943,7 @@ function stopAll() {
   btnStart.disabled = false;
   btnStart.textContent = '启动';
   if (videoStream) {
-    videoStream.getTracks().forEach(t => t.stop());
+    try { videoStream.getTracks().forEach(t => t.stop()); } catch (e) {}
     videoStream = null;
   }
   video.srcObject = null;
@@ -841,6 +957,8 @@ function stopAll() {
   lockedTrackId = null;
   lockedMissFrames = 0;
   lockAge = 0;
+  vstatusEl.textContent = '已停止';
+  vstatusEl.style.color = '#ffb74d';
 }
 
 function resetLock() {
@@ -851,11 +969,40 @@ function resetLock() {
   lockBadge.className = 'lock-badge off';
 }
 
+// 重开摄像头
+async function reopenCamera() {
+  hideWarn();
+  const wasRunning = running;
+  running = false;
+  videoFpsRunning = false;
+  await new Promise(r => setTimeout(r, 200));
+
+  if (videoStream) {
+    try { videoStream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    videoStream = null;
+  }
+  video.srcObject = null;
+
+  try {
+    await startCamera();
+    if (wasRunning) {
+      running = true;
+      detectLoop();
+      renderLoop();
+    }
+    showInfo('摄像头已重开：' + video.videoWidth + '×' + video.videoHeight);
+    setTimeout(hideWarn, 2500);
+  } catch (e) {
+    console.warn('reopen failed', e);
+  }
+}
+
 // ============ 事件绑定 ============
 btnConnect.addEventListener('click', connectWs);
 btnStart.addEventListener('click', startAll);
 btnStop.addEventListener('click', stopAll);
 btnResetLock.addEventListener('click', resetLock);
+btnReopen.addEventListener('click', reopenCamera);
 
 roiEnabledEl.addEventListener('change', () => {
   roiEnabled = roiEnabledEl.checked;
@@ -873,8 +1020,7 @@ function updateRoiInfo() {
 [modelTypeEl, inputSizeEl, maxPosesEl, camResEl].forEach(el => {
   el.addEventListener('change', () => {
     if (running) {
-      warnBox.textContent = '此设置需要"停止 → 启动"才能生效';
-      warnBox.className = 'warn-box show';
+      showInfo('此设置需要"停止 → 启动"才能生效');
     }
   });
 });
@@ -882,9 +1028,8 @@ function updateRoiInfo() {
 inferHzEl.addEventListener('change', () => {
   INFER_HZ = parseInt(inferHzEl.value) || 10;
   if (running) {
-    warnBox.textContent = '推理频率已改为 ' + INFER_HZ + ' Hz（立即生效）';
-    warnBox.className = 'warn-box show';
-    setTimeout(() => { warnBox.className = 'warn-box'; }, 2000);
+    showInfo('推理频率已改为 ' + INFER_HZ + ' Hz（立即生效）');
+    setTimeout(hideWarn, 2000);
   }
 });
 
@@ -892,9 +1037,8 @@ canvasSizeEl.addEventListener('change', () => {
   CANVAS_HEIGHT = parseInt(canvasSizeEl.value) || 360;
   if (video.videoWidth) applyCanvasSize();
   if (running) {
-    warnBox.textContent = '画布分辨率已改为 ' + overlay.width + '×' + overlay.height + '（立即生效）';
-    warnBox.className = 'warn-box show';
-    setTimeout(() => { warnBox.className = 'warn-box'; }, 2000);
+    showInfo('画布分辨率已改为 ' + overlay.width + '×' + overlay.height + '（立即生效）');
+    setTimeout(hideWarn, 2000);
   }
 });
 
@@ -904,12 +1048,20 @@ const savedIp = localStorage.getItem('espIp');
 if (savedIp) espIpEl.value = savedIp;
 espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.value));
 
-['modelType', 'inputSize', 'maxPoses', 'aimPart', 'targetMode', 'inferHz', 'canvasSize', 'camRes'].forEach(id => {
+['modelType', 'inputSize', 'maxPoses', 'aimPart', 'targetMode', 'inferHz', 'canvasSize'].forEach(id => {
   const el = document.getElementById(id);
   const saved = localStorage.getItem('pref_' + id);
   if (saved !== null && el) el.value = saved;
   if (el) el.addEventListener('change', () => localStorage.setItem('pref_' + id, el.value));
 });
+
+// ★ 摄像头分辨率：清除旧值，每次都用默认 320×240（防黑屏）
+localStorage.removeItem('pref_camRes');
+camResEl.value = '240';
+camResEl.addEventListener('change', () => {
+  // 不保存到 localStorage，避免下次启动时用错误的值
+});
+
 ['roiEnabled', 'roiPercent'].forEach(id => {
   const el = document.getElementById(id);
   const saved = localStorage.getItem('pref_' + id);
