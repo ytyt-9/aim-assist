@@ -43,7 +43,7 @@
   .switch .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 2px; bottom: 2px; background: white; border-radius: 50%; transition: 0.2s; }
   .switch input:checked + .slider { background: #4fc3f7; }
   .switch input:checked + .slider:before { transform: translateX(16px); }
-  .roi-info { font-size: 0.7rem; color: #ffd54f; font-family: monospace; }
+  .roi-info { font-size: 0.7rem; font-family: monospace; }
   .lock-badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.7rem; font-weight: bold; }
   .lock-badge.active { background: #7cff7c; color: #000; }
   .lock-badge.waiting { background: #ffb74d; color: #000; }
@@ -66,6 +66,13 @@
   .speed-table { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2px; font-size: 0.6rem; font-family: monospace; color: #cde4f7; margin-top: 4px; }
   .speed-table span { background: #0a1626; padding: 2px 4px; border-radius: 3px; text-align: center; }
   .speed-table span.hdr { color: #7cff7c; font-weight: bold; }
+  /* 彩色标签：与参考圈颜色一致 */
+  .label-brake { color: #7cff7c !important; }
+  .label-exit  { color: #ffb74d !important; }
+  .label-stop  { color: #4fc3f7 !important; }
+  .info-brake  { color: #7cff7c !important; }
+  .info-exit   { color: #ffb74d !important; }
+  .info-stop   { color: #4fc3f7 !important; }
 </style>
 </head>
 <body>
@@ -129,19 +136,19 @@
   <div class="brake-box">
     <div class="group-label">★ 到位锁死 + 迟滞 + 步长比例（v32）</div>
     <div class="row">
-      <label>刹车距离</label>
+      <label class="label-brake">刹车距离</label>
       <input type="number" id="brakeDistance" min="10" max="300" step="5" value="60">
-      <span class="roi-info">px（进入此范围开始减速）</span>
+      <span class="roi-info info-brake">px（绿色虚线圆）</span>
     </div>
     <div class="row">
-      <label>停止半径</label>
+      <label class="label-stop">停止半径</label>
       <input type="number" id="stopRadius" min="1" max="80" step="1" value="10">
-      <span class="roi-info">px（进入此范围立即锁死）</span>
+      <span class="roi-info info-stop">px（蓝色实线圆）</span>
     </div>
     <div class="row">
-      <label>退出半径</label>
+      <label class="label-exit">退出半径</label>
       <input type="number" id="exitRadius" min="2" max="150" step="1" value="25">
-      <span class="roi-info">px（锁死后超过此范围才重跟）</span>
+      <span class="roi-info info-exit">px（橙色虚线圆）</span>
     </div>
     <div class="row">
       <label>步长比例</label>
@@ -158,11 +165,13 @@
       </select>
     </div>
     <div class="hint">
-      <b>为什么之前会跑过？</b>手机发指令和检测之间有延迟，每帧移动量太大，累计起来就冲过去了。<br>
+      <b>画面上的三个参考圆：</b><br>
+      · <span class="info-brake"><b>绿色虚线圆</b> = 刹车距离（进入此范围开始减速）</span><br>
+      · <span class="info-exit"><b>橙色虚线圆</b> = 退出半径（锁死后超过此范围才重跟）</span><br>
+      · <span class="info-stop"><b>蓝色实线圆</b> = 停止半径（进入此范围立即锁死）</span><br>
       <b>步长比例是什么？</b>每帧最多走剩余距离的百分之几。<br>
-      · <b>小比例（20~30%）</b>：多帧逐步逼近，几乎不可能过冲，但到位稍慢。<br>
-      · <b>大比例（70~90%）</b>：到位快，但配合延迟可能微过冲；有反过冲钳制时会贴住目标。<br>
-      · <b>100%</b>：不限制单帧步长，只靠钳制与停止半径控制，速度最快。<br>
+      · <b>小比例（20~30%）</b>：多帧逐步逼近，几乎不可能过冲。<br>
+      · <b>大比例（70~90%）</b>：到位快，但配合延迟可能微过冲。<br>
       <b>其它三层防护仍然生效：</b>到位立即锁死、迟滞退出、反过冲钳制。
     </div>
     <div class="speed-table">
@@ -388,7 +397,7 @@ const MOVING_BOOST = 2.0;
 const AIM_SMOOTH_ALPHA = 0.82;
 const LOCK_TIMEOUT_FRAMES = 20;
 
-// ★★★ v32：每帧步长比例，实时可调
+// v32：每帧步长比例，实时可调
 let FRAME_STEP_RATIO = 0.40;
 
 // 到位锁死 + 迟滞
@@ -536,7 +545,6 @@ function updateBrakeParams() {
   }
 }
 
-// ★★★ v32：步长比例实时读取
 function updateStepRatio() {
   FRAME_STEP_RATIO = parseFloat(frameStepRatioEl.value) || 0.40;
   if (FRAME_STEP_RATIO < 0.05) FRAME_STEP_RATIO = 0.05;
@@ -946,7 +954,6 @@ function renderLoop() {
     if (DIR_Y_FLIP) dy = -dy;
   }
 
-  // ★★★ v32 核心：到位锁死 + 迟滞 + 实时可调步长比例
   const scale = getSpeedScale();
   const effBrake = brakeDistance * scale.brake;
   const effStop  = stopRadius * scale.stop;
@@ -982,7 +989,6 @@ function renderLoop() {
       let rawDx = dx * adaptiveGain * gainMul;
       let rawDy = dy * adaptiveGain * gainMul;
 
-      // ★ 每帧最多走剩余距离的 FRAME_STEP_RATIO（实时可调）
       const maxStep = Math.min(MAX_MOVE_PER_FRAME, dist * FRAME_STEP_RATIO);
       sendDx = Math.max(-maxStep, Math.min(maxStep, rawDx));
       sendDy = Math.max(-maxStep, Math.min(maxStep, rawDy));
@@ -1082,28 +1088,57 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     drawText('ROI ' + roiPercent + '%', roi.x1 + 4, roi.y1 + 11);
   }
 
+  // ============================================================
+  // 绘制三个参考圆 + 标注
+  // ============================================================
   if (latestPersons.length > 0) {
     const scale = getSpeedScale();
     const effBrake = brakeDistance * scale.brake;
     const effStop  = stopRadius * scale.stop;
     const effExit  = exitRadius * scale.stop;
+
+    // 1) 刹车距离（绿色虚线圆）
     ctx.setLineDash([4, 4]);
-    ctx.strokeStyle = 'rgba(124, 255, 124, 0.35)';
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(124, 255, 124, 0.55)';
+    ctx.lineWidth = 1.2;
     ctx.beginPath();
     ctx.arc(screenCx, screenCy, effBrake, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.strokeStyle = 'rgba(255, 183, 77, 0.55)';
+
+    // 2) 退出半径（橙色虚线圆）
+    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(255, 183, 77, 0.7)';
     ctx.lineWidth = 1.2;
     ctx.beginPath();
     ctx.arc(screenCx, screenCy, effExit, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.strokeStyle = 'rgba(79, 195, 247, 0.8)';
+
+    // 3) 停止半径（蓝色实线圆）
+    ctx.setLineDash([]);
+    ctx.strokeStyle = 'rgba(79, 195, 247, 0.9)';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.arc(screenCx, screenCy, effStop, 0, Math.PI * 2);
     ctx.stroke();
-    ctx.setLineDash([]);
+
+    // --- 文字标注（带黑色阴影，便于在浅/深背景上阅读）---
+    ctx.font = 'bold 11px monospace';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.95)';
+    ctx.shadowBlur = 3;
+
+    // 刹车距离 标签：放在绿色圆正上方外侧
+    ctx.fillStyle = 'rgba(124, 255, 124, 0.98)';
+    drawText('刹车 ' + Math.round(effBrake) + 'px', screenCx, screenCy - effBrake - 6);
+
+    // 退出半径 标签：放在橙色圆正下方外侧
+    ctx.fillStyle = 'rgba(255, 183, 77, 0.98)';
+    drawText('退出 ' + Math.round(effExit) + 'px', screenCx, screenCy + effExit + 16);
+
+    // 停止半径 标签：放在蓝色圆正右方外侧
+    ctx.fillStyle = 'rgba(79, 195, 247, 0.98)';
+    drawText('停止 ' + Math.round(effStop) + 'px', screenCx + effStop + 6, screenCy + 4);
+
+    ctx.shadowBlur = 0;
   }
 
   const mode = targetModeEl.value;
@@ -1314,7 +1349,6 @@ exitRadiusEl.addEventListener('change', () => {
   localStorage.setItem('pref_exitRadius', exitRadiusEl.value);
 });
 
-// ★★★ v32：步长比例实时生效
 frameStepRatioEl.addEventListener('change', () => {
   updateStepRatio();
   if (running) {
