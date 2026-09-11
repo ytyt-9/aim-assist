@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v16（方向修正）</title>
+<title>视觉跟随 · v17</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -12,7 +12,7 @@
   video#video { width: 100%; display: block; }
   canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
 
-  /* ★ 翻转只作用于 video 和 canvas，其它元素不受影响 */
+  /* ★ 前置摄像头时，加 .flip 类让 video 和 canvas 一起水平翻转 */
   .video-wrap.flip video,
   .video-wrap.flip canvas {
     transform: scaleX(-1);
@@ -86,7 +86,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v16</h1>
+<h1>视觉跟随 · v17</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -129,15 +129,6 @@
       <option value="1080">1920×1080</option>
     </select>
     <button id="btnReopen" class="ghost" style="flex:0 0 auto; padding:4px 8px; font-size:0.7rem;">重开</button>
-  </div>
-  <!-- ★ 左右翻转开关 -->
-  <div class="row">
-    <label>水平翻转</label>
-    <label class="switch">
-      <input type="checkbox" id="flipEnabled">
-      <span class="slider"></span>
-    </label>
-    <span style="font-size:0.68rem; color:#9bc4e2;">勾选后画面左右互换（觉得画面反了就勾它）</span>
   </div>
   <div class="row">
     <label>模型</label>
@@ -353,7 +344,7 @@ let latestPosesTime = 0;
 let lastDrawnPosesTime = 0;
 
 let actualFacing = '';
-let flipEnabled = false;   // ★ 默认不翻
+let mirrored = false;   // ★ 当前是否处于镜像显示（前置为 true）
 
 let prewarmedDetector = null;
 let prewarmKey = '';
@@ -391,7 +382,6 @@ const maxPosesEl = document.getElementById('maxPoses');
 const inferHzEl = document.getElementById('inferHz');
 const camResEl = document.getElementById('camRes');
 const camFacingEl = document.getElementById('camFacing');
-const flipEnabledEl = document.getElementById('flipEnabled');
 const roiEnabledEl = document.getElementById('roiEnabled');
 const roiPercentEl = document.getElementById('roiPercent');
 const roiPercentValEl = document.getElementById('roiPercentVal');
@@ -414,12 +404,17 @@ function hideWarn()     { warnBox.className = 'warn-box'; }
 function tfReady()      { return (typeof window.tf !== 'undefined' && typeof window.poseDetection !== 'undefined'); }
 function setLibStatus(msg, cls) { libStatusEl.textContent = msg; libStatusEl.className = 'lib-status' + (cls ? ' ' + cls : ''); }
 
-function applyFlip() {
-  if (flipEnabled) {
+// ★ 根据实际镜头设置翻转状态
+// 前置摄像头：浏览器默认给的是镜像，我们要 scaleX(-1) 翻回"正常视角"
+// 后置摄像头：本来就不是镜像，不翻
+function updateMirror() {
+  mirrored = (actualFacing === 'user');
+  if (mirrored) {
     videoWrap.classList.add('flip');
   } else {
     videoWrap.classList.remove('flip');
   }
+  console.log('[Mirror]', mirrored ? 'ON (前置)' : 'OFF (后置/未知)');
 }
 
 // ============================================================
@@ -645,8 +640,11 @@ async function startCamera() {
   camResInfoEl.textContent = video.videoWidth + '×' + video.videoHeight;
   canvasInfoEl.textContent = overlay.width + '×' + overlay.height;
 
+  // ★ 根据实际镜头应用镜像
+  updateMirror();
+
   const facingLabel = (actualFacing === 'user') ? '前置' : (actualFacing === 'environment') ? '后置' : '未知';
-  vstatusEl.textContent = video.videoWidth + '×' + video.videoHeight + ' · ' + facingLabel;
+  vstatusEl.textContent = video.videoWidth + '×' + video.videoHeight + ' · ' + facingLabel + (mirrored ? ' · 已翻转' : '');
   vstatusEl.style.color = '#7cff7c';
 
   startVideoFpsMonitor();
@@ -854,8 +852,8 @@ function renderLoop() {
     hasTarget = 1;
     dx = target.aim.x - screenCx;
     dy = target.aim.y - screenCy;
-    // ★ 水平翻转时，dx 取反，保证光标和画面对应
-    if (flipEnabled) dx = -dx;
+    // ★ 镜像时 dx 取反（画面翻转过，坐标方向反了）
+    if (mirrored) dx = -dx;
     lockedIdEl.textContent = target.trackId !== null ? target.trackId : '-';
   } else {
     lockedIdEl.textContent = lockedTrackId !== null ? lockedTrackId : '-';
@@ -1126,14 +1124,6 @@ btnStop.addEventListener('click', stopAll);
 btnResetLock.addEventListener('click', resetLock);
 btnReopen.addEventListener('click', reopenCamera);
 
-flipEnabledEl.addEventListener('change', () => {
-  flipEnabled = flipEnabledEl.checked;
-  applyFlip();
-  localStorage.setItem('flipEnabled', flipEnabled ? '1' : '0');
-  showInfo(flipEnabled ? '水平翻转：已开启（画面左右互换，光标方向已同步）' : '水平翻转：已关闭');
-  setTimeout(hideWarn, 2000);
-});
-
 roiEnabledEl.addEventListener('change', () => { roiEnabled = roiEnabledEl.checked; updateRoiInfo(); });
 roiPercentEl.addEventListener('input', () => {
   roiPercent = parseInt(roiPercentEl.value);
@@ -1169,11 +1159,8 @@ espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.v
 camResEl.value = 'auto';
 camFacingEl.value = 'user';
 
-// ★ 默认不勾选翻转
-const savedFlip = localStorage.getItem('flipEnabled');
-flipEnabled = (savedFlip === '1');   // 默认 false
-flipEnabledEl.checked = flipEnabled;
-applyFlip();
+// 清理旧的翻转设置（不再使用）
+localStorage.removeItem('flipEnabled');
 
 ['roiEnabled', 'roiPercent'].forEach(id => {
   const el = document.getElementById(id);
