@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v24</title>
+<title>视觉跟随 · v25</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -59,11 +59,13 @@
   .lib-status.err { color: #ff5252; }
   .dir-box { background: #2a0a0a; border: 1px solid #ff5252; border-radius: 4px; padding: 5px 8px; margin-top: 4px; }
   .dir-box .group-label { color: #ffb74d; font-size: 0.65rem; margin-bottom: 3px; }
+  .hint { font-size: 0.62rem; color: #9bc4e2; line-height: 1.4; background: #0a1626; padding: 4px 6px; border-radius: 3px; margin-top: 4px; }
+  .hint b { color: #ffd54f; }
 </style>
 </head>
 <body>
 
-<h1>视觉跟随 · v24</h1>
+<h1>视觉跟随 · v25</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -101,8 +103,8 @@
     <div class="row">
       <label>Y 方向</label>
       <select id="dirYFlip">
-        <option value="normal" selected>正常（不反转）</option>
-        <option value="invert">正转</option>
+        <option value="normal" selected>正转</option>
+        <option value="invert">反转</option>
       </select>
     </div>
   </div>
@@ -111,21 +113,28 @@
   <div class="row">
     <label>速度</label>
     <select id="moveSpeed">
-      <option value="0.03">慢（0.03）</option>
-      <option value="0.05" selected>中（0.05，推荐）</option>
-      <option value="0.08">快（0.08）</option>
-      <option value="0.12">很快（0.12）</option>
-      <option value="0.20">极快（0.20）</option>
+      <option value="0.05">慢（0.05）</option>
+      <option value="0.10">中（0.10）</option>
+      <option value="0.20" selected>快（0.20，推荐）</option>
+      <option value="0.35">很快（0.35）</option>
+      <option value="0.50">极快（0.50）</option>
+      <option value="0.80">瞬间（0.80）</option>
     </select>
   </div>
   <div class="row">
     <label>死区</label>
     <select id="deadZone">
-      <option value="0">0 px</option>
-      <option value="3" selected>3 px（推荐）</option>
+      <option value="0" selected>0 px（瞬间模式推荐）</option>
+      <option value="3">3 px</option>
       <option value="5">5 px</option>
       <option value="8">8 px</option>
     </select>
+  </div>
+  <div class="hint">
+    <b>死区是什么？</b>当目标离准星的距离小于死区值时，就认为"已经对齐"，不再输出移动指令。<br>
+    · <b>死区越小</b>（如 0px）：对准越精确，但接近目标时可能反复微抖（振荡）。<br>
+    · <b>死区越大</b>（如 8px）：画面更稳，但可能停在离准星还有一点距离的地方。<br>
+    · 想"瞬间到位"，把死区设为 0，速度设为"瞬间"。
   </div>
 
   <div class="sec-title">检测设置</div>
@@ -304,17 +313,18 @@ const WS_PORT = 81;
 const SEND_HZ = 30;
 let   INFER_HZ = 8;
 
-let MOVE_GAIN = 0.05;
-let DEAD_ZONE = 3;
+let MOVE_GAIN = 0.20;
+let DEAD_ZONE = 0;
+let MAX_MOVE_PER_FRAME = 60;   // 动态：随速度档位变化
+
 const MIN_SEND = 1;
 const STILL_DAMPING = 0.4;
 let STILL_THRESHOLD = 30;
 const MOVING_BOOST = 2.0;
-const MAX_MOVE_PER_FRAME = 25;
 const AIM_SMOOTH_ALPHA = 0.7;
 const LOCK_TIMEOUT_FRAMES = 20;
 
-// ★ 方向开关（默认：X 正转，Y 正常；value 逻辑不变）
+// ★ 方向开关（默认：X 正转，Y 正转；value 逻辑不变）
 let DIR_X_FLIP = false;   // 默认正转（不反转）
 let DIR_Y_FLIP = false;
 
@@ -405,6 +415,13 @@ function showInfo(msg)  { warnBox.textContent = msg; warnBox.className = 'warn-b
 function hideWarn()     { warnBox.className = 'warn-box'; }
 function tfReady()      { return (typeof window.tf !== 'undefined' && typeof window.cocoSsd !== 'undefined'); }
 function setLibStatus(msg, cls) { libStatusEl.textContent = msg; libStatusEl.className = 'lib-status' + (cls ? ' ' + cls : ''); }
+
+// ★ 根据速度档位动态计算每帧最大移动量
+function updateSpeedParams() {
+  MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.20;
+  // 慢速档位限制小，快速档位放开到最大 240
+  MAX_MOVE_PER_FRAME = Math.min(240, Math.max(25, MOVE_GAIN * 300));
+}
 
 // ★ 只负责画面 CSS 翻转，跟 dx 方向无关
 function updateMirror() {
@@ -726,11 +743,15 @@ function renderLoop() {
     targetSpeed = 0; lastAimTime = 0;
   }
 
-  // 自适应增益
+  // ★ 自适应增益：只在慢速/中速档位启用阻尼，快速档位直接全速跟随
   let adaptiveGain = MOVE_GAIN;
   if (hasTarget) {
-    if (targetSpeed < STILL_THRESHOLD) adaptiveGain = MOVE_GAIN * STILL_DAMPING;
-    else if (targetSpeed > STILL_THRESHOLD * 3) adaptiveGain = MOVE_GAIN * MOVING_BOOST;
+    if (MOVE_GAIN < 0.30) {
+      // 慢速模式：目标静止时阻尼，避免过冲
+      if (targetSpeed < STILL_THRESHOLD) adaptiveGain = MOVE_GAIN * STILL_DAMPING;
+      else if (targetSpeed > STILL_THRESHOLD * 3) adaptiveGain = MOVE_GAIN * MOVING_BOOST;
+    }
+    // 快速模式（>=0.30）：不做任何阻尼，全速跟随，实现"瞬间到达"
   }
 
   let dx = 0, dy = 0;
@@ -838,7 +859,7 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.strokeRect(target.x1, target.y1, target.w, target.h);
 
     const aim = getAimPoint(target, part);
-    // ★ 绘制屏幕中心到瞄准点的虚线（恢复）
+    // ★ 绘制屏幕中心到瞄准点的虚线
     ctx.setLineDash([5, 5]);
     ctx.strokeStyle = 'rgba(255, 213, 79, 0.8)';
     ctx.lineWidth = 1.5;
@@ -909,8 +930,8 @@ async function startAll() {
     }
 
     INFER_HZ = parseInt(inferHzEl.value) || 8;
-    MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.05;
-    DEAD_ZONE = parseFloat(deadZoneEl.value) || 3;
+    updateSpeedParams();
+    DEAD_ZONE = parseFloat(deadZoneEl.value) || 0;
     DIR_X_FLIP = (dirXFlipEl.value === 'invert');
     DIR_Y_FLIP = (dirYFlipEl.value === 'invert');
 
@@ -991,18 +1012,21 @@ dirXFlipEl.addEventListener('change', () => {
 });
 dirYFlipEl.addEventListener('change', () => {
   DIR_Y_FLIP = (dirYFlipEl.value === 'invert');
-  showInfo('Y方向：' + (DIR_Y_FLIP ? '正转' : '正常') + '（立即生效）');
+  showInfo('Y方向：' + (DIR_Y_FLIP ? '反转' : '正转') + '（立即生效）');
   setTimeout(hideWarn, 1500);
   localStorage.setItem('pref_dirYFlip', dirYFlipEl.value);
 });
 
 moveSpeedEl.addEventListener('change', () => {
-  MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.05;
-  if (running) { showInfo('速度改为 ' + MOVE_GAIN); setTimeout(hideWarn, 1500); }
+  updateSpeedParams();
+  if (running) {
+    showInfo('速度改为 ' + MOVE_GAIN + '（每帧上限 ' + MAX_MOVE_PER_FRAME + '）');
+    setTimeout(hideWarn, 1500);
+  }
   localStorage.setItem('pref_moveSpeed', moveSpeedEl.value);
 });
 deadZoneEl.addEventListener('change', () => {
-  DEAD_ZONE = parseFloat(deadZoneEl.value) || 3;
+  DEAD_ZONE = parseFloat(deadZoneEl.value) || 0;
   if (running) { showInfo('死区改为 ' + DEAD_ZONE + ' px'); setTimeout(hideWarn, 1500); }
   localStorage.setItem('pref_deadZone', deadZoneEl.value);
 });
@@ -1058,8 +1082,8 @@ camFacingEl.value = 'user';
 roiEnabled = roiEnabledEl.checked;
 roiPercent = parseInt(roiPercentEl.value);
 INFER_HZ = parseInt(inferHzEl.value) || 8;
-MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.05;
-DEAD_ZONE = parseFloat(deadZoneEl.value) || 3;
+updateSpeedParams();
+DEAD_ZONE = parseFloat(deadZoneEl.value) || 0;
 DIR_X_FLIP = (dirXFlipEl.value === 'invert');
 DIR_Y_FLIP = (dirYFlipEl.value === 'invert');
 roiPercentValEl.textContent = roiPercent + '%';
