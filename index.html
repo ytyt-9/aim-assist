@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v14（翻转开关）</title>
+<title>视觉跟随 · v15</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -12,23 +12,33 @@
   video#video { width: 100%; display: block; }
   canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
 
-  /* ★ 左右翻转：video 和 canvas 一起翻转，视觉上保持对齐 */
+  /* ★ 只翻转 video 和 canvas，其它元素不受影响 */
   .video-wrap.flip video,
   .video-wrap.flip canvas {
     transform: scaleX(-1);
-  }
-  /* 状态文字反向翻转，保证正常可读 */
-  .video-wrap.flip .vstatus {
-    transform: scaleX(-1);
-    right: 4px;
-    left: auto;
   }
 
   .crosshair { position: absolute; top: 50%; left: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; z-index: 3; }
   .crosshair::before, .crosshair::after { content: ''; position: absolute; background: #ffd54f; box-shadow: 0 0 3px #000; }
   .crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
   .crosshair::after { top: 10px; left: 0; width: 2px; height: 2px; height: 22px; }
-  .video-wrap .vstatus { position: absolute; left: 4px; bottom: 4px; background: rgba(0,0,0,0.7); color: #7cff7c; font-family: monospace; font-size: 0.62rem; padding: 2px 5px; border-radius: 3px; z-index: 4; pointer-events: none; }
+
+  /* ★ vstatus 固定在左下角，永远不翻转 */
+  .video-wrap .vstatus {
+    position: absolute;
+    left: 4px;
+    bottom: 4px;
+    background: rgba(0,0,0,0.7);
+    color: #7cff7c;
+    font-family: monospace;
+    font-size: 0.62rem;
+    padding: 2px 5px;
+    border-radius: 3px;
+    z-index: 4;
+    pointer-events: none;
+    transform: none !important;   /* 强制不翻转 */
+  }
+
   .panel { width: 100%; max-width: 480px; margin-top: 8px; background: #16213e; border-radius: 6px; padding: 8px; }
   .row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 0.82rem; flex-wrap: wrap; }
   .row label { flex: 0 0 auto; color: #9bc4e2; font-size: 0.75rem; min-width: 58px; }
@@ -76,7 +86,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v14</h1>
+<h1>视觉跟随 · v15</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -162,15 +172,6 @@
       <option value="10" selected>10 Hz（推荐）</option>
       <option value="15">15 Hz（灵敏）</option>
       <option value="20">20 Hz</option>
-    </select>
-  </div>
-  <div class="row">
-    <label>画布分辨率</label>
-    <select id="canvasSize">
-      <option value="180">320×180</option>
-      <option value="270">480×270</option>
-      <option value="360" selected>640×360（推荐）</option>
-      <option value="540">960×540</option>
     </select>
   </div>
 
@@ -316,7 +317,6 @@ window.libsPromise = libsPromise;
 const WS_PORT = 81;
 const SEND_HZ = 30;
 let   INFER_HZ = 10;
-let   CANVAS_HEIGHT = 360;
 
 const KP_SCORE_MIN = 0.30;
 const SMOOTH_ALPHA = 0.55;
@@ -352,9 +352,8 @@ let latestPoses = [];
 let latestPosesTime = 0;
 let lastDrawnPosesTime = 0;
 
-let scaleX = 1, scaleY = 1;
 let actualFacing = '';
-let flipEnabled = true;   // ★ 左右翻转
+let flipEnabled = true;
 
 let prewarmedDetector = null;
 let prewarmKey = '';
@@ -393,7 +392,6 @@ const inferHzEl = document.getElementById('inferHz');
 const camResEl = document.getElementById('camRes');
 const camFacingEl = document.getElementById('camFacing');
 const flipEnabledEl = document.getElementById('flipEnabled');
-const canvasSizeEl = document.getElementById('canvasSize');
 const roiEnabledEl = document.getElementById('roiEnabled');
 const roiPercentEl = document.getElementById('roiPercent');
 const roiPercentValEl = document.getElementById('roiPercentVal');
@@ -416,7 +414,7 @@ function hideWarn()     { warnBox.className = 'warn-box'; }
 function tfReady()      { return (typeof window.tf !== 'undefined' && typeof window.poseDetection !== 'undefined'); }
 function setLibStatus(msg, cls) { libStatusEl.textContent = msg; libStatusEl.className = 'lib-status' + (cls ? ' ' + cls : ''); }
 
-// ★ 应用左右翻转
+// 应用左右翻转（只影响 video 和 canvas）
 function applyFlip() {
   if (flipEnabled) {
     videoWrap.classList.add('flip');
@@ -641,9 +639,9 @@ async function startCamera() {
     return;
   }
 
-  applyCanvasSize();
-  scaleX = overlay.width  / video.videoWidth;
-  scaleY = overlay.height / video.videoHeight;
+  // ★ canvas 内部尺寸 = video 内部尺寸（保证比例一致、框对齐）
+  overlay.width  = video.videoWidth;
+  overlay.height = video.videoHeight;
 
   camResInfoEl.textContent = video.videoWidth + '×' + video.videoHeight;
   canvasInfoEl.textContent = overlay.width + '×' + overlay.height;
@@ -653,18 +651,6 @@ async function startCamera() {
   vstatusEl.style.color = '#7cff7c';
 
   startVideoFpsMonitor();
-}
-
-function applyCanvasSize() {
-  const h = CANVAS_HEIGHT;
-  const w = Math.round(h * 16 / 9);
-  overlay.width = w;
-  overlay.height = h;
-  if (video.videoWidth) {
-    scaleX = overlay.width  / video.videoWidth;
-    scaleY = overlay.height / video.videoHeight;
-    canvasInfoEl.textContent = overlay.width + '×' + overlay.height;
-  }
 }
 
 function startVideoFpsMonitor() {
@@ -694,7 +680,7 @@ function startVideoFpsMonitor() {
 }
 
 // ============================================================
-// 关键点工具
+// 关键点工具（canvas 尺寸 = video 尺寸，坐标直接对应，scaleX=scaleY=1）
 // ============================================================
 function kpMap(keypoints) {
   const m = {};
@@ -711,25 +697,25 @@ function avg(points) {
 function getAimPoint(kps, part) {
   const kp = kpMap(kps);
   if (part === 'head') {
-    if (ok(kp.nose)) return { x: kp.nose.x * scaleX, y: kp.nose.y * scaleY };
+    if (ok(kp.nose)) return { x: kp.nose.x, y: kp.nose.y };
     const eyes = [kp.left_eye, kp.right_eye].filter(ok);
-    if (eyes.length > 0) { const a = avg(eyes); return { x: a.x * scaleX, y: a.y * scaleY }; }
+    if (eyes.length > 0) return avg(eyes);
     const ears = [kp.left_ear, kp.right_ear].filter(ok);
-    if (ears.length > 0) { const a = avg(ears); return { x: a.x * scaleX, y: a.y * scaleY }; }
+    if (ears.length > 0) return avg(ears);
     const sh = [kp.left_shoulder, kp.right_shoulder].filter(ok);
-    if (sh.length > 0) { const a = avg(sh); return { x: a.x * scaleX, y: a.y * scaleY - 20 }; }
+    if (sh.length > 0) { const a = avg(sh); return { x: a.x, y: a.y - 20 }; }
     return null;
   }
   if (part === 'body') {
     const ls = kp.left_shoulder, rs = kp.right_shoulder;
     const lh = kp.left_hip,      rh = kp.right_hip;
     if (ok(ls) && ok(rs) && ok(lh) && ok(rh)) {
-      return { x: (ls.x + rs.x + lh.x + rh.x) / 4 * scaleX, y: (ls.y + rs.y + lh.y + rh.y) / 4 * scaleY };
+      return { x: (ls.x + rs.x + lh.x + rh.x) / 4, y: (ls.y + rs.y + lh.y + rh.y) / 4 };
     }
     const sh = [ls, rs].filter(ok);
-    if (sh.length === 2) { const a = avg(sh); return { x: a.x * scaleX, y: a.y * scaleY }; }
+    if (sh.length === 2) return avg(sh);
     const hp = [lh, rh].filter(ok);
-    if (hp.length === 2) { const a = avg(hp); return { x: a.x * scaleX, y: a.y * scaleY }; }
+    if (hp.length === 2) return avg(hp);
     const headPt = getAimPoint(kps, 'head');
     if (headPt) return { x: headPt.x, y: headPt.y + 30 };
     return null;
@@ -740,12 +726,12 @@ function getAimPoint(kps, part) {
     const knees = [lk, rk].filter(ok);
     const ankles = [la, ra].filter(ok);
     if (knees.length === 2 && ankles.length === 2) {
-      return { x: (lk.x + rk.x + la.x + ra.x) / 4 * scaleX, y: (lk.y + rk.y + la.y + ra.y) / 4 * scaleY };
+      return { x: (lk.x + rk.x + la.x + ra.x) / 4, y: (lk.y + rk.y + la.y + ra.y) / 4 };
     }
-    if (knees.length > 0) { const a = avg(knees); return { x: a.x * scaleX, y: a.y * scaleY }; }
-    if (ankles.length > 0) { const a = avg(ankles); return { x: a.x * scaleX, y: a.y * scaleY }; }
+    if (knees.length > 0) return avg(knees);
+    if (ankles.length > 0) return avg(ankles);
     const hp = [kp.left_hip, kp.right_hip].filter(ok);
-    if (hp.length === 2) { const a = avg(hp); return { x: a.x * scaleX, y: a.y * scaleY + 40 }; }
+    if (hp.length === 2) { const a = avg(hp); return { x: a.x, y: a.y + 40 }; }
     return null;
   }
   return null;
@@ -756,11 +742,10 @@ function getBBox(kps) {
   if (valid.length < 3) return null;
   let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
   for (const k of valid) {
-    const x = k.x * scaleX, y = k.y * scaleY;
-    if (x < x1) x1 = x;
-    if (y < y1) y1 = y;
-    if (x > x2) x2 = x;
-    if (y > y2) y2 = y;
+    if (k.x < x1) x1 = k.x;
+    if (k.y < y1) y1 = k.y;
+    if (k.x > x2) x2 = k.x;
+    if (k.y > y2) y2 = k.y;
   }
   return { x1, y1, x2, y2, w: x2 - x1, h: y2 - y1 };
 }
@@ -941,7 +926,7 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
   ctx.fillStyle = 'rgba(79,195,247,0.55)';
   for (const pose of poses) {
     for (const k of pose.keypoints) {
-      if (ok(k)) ctx.fillRect((k.x * scaleX) - 1.5, (k.y * scaleY) - 1.5, 3, 3);
+      if (ok(k)) ctx.fillRect(k.x - 1.5, k.y - 1.5, 3, 3);
     }
   }
 
@@ -1072,12 +1057,11 @@ async function startAll() {
     }
 
     INFER_HZ = parseInt(inferHzEl.value) || 10;
-    CANVAS_HEIGHT = parseInt(canvasSizeEl.value) || 360;
 
     if (!videoStream) {
       try { await startCamera(); }
       catch (e) { btnStart.disabled = false; btnStart.textContent = '启动'; return; }
-    } else { applyCanvasSize(); }
+    }
 
     lockedTrackId = null; lockedMissFrames = 0; lockAge = 0;
     latestPoses = []; latestPosesTime = 0; lastDrawnPosesTime = 0;
@@ -1141,7 +1125,6 @@ btnStop.addEventListener('click', stopAll);
 btnResetLock.addEventListener('click', resetLock);
 btnReopen.addEventListener('click', reopenCamera);
 
-// ★ 翻转开关
 flipEnabledEl.addEventListener('change', () => {
   flipEnabled = flipEnabledEl.checked;
   applyFlip();
@@ -1169,19 +1152,13 @@ inferHzEl.addEventListener('change', () => {
   if (running) { showInfo('推理频率已改为 ' + INFER_HZ + ' Hz（立即生效）'); setTimeout(hideWarn, 2000); }
 });
 
-canvasSizeEl.addEventListener('change', () => {
-  CANVAS_HEIGHT = parseInt(canvasSizeEl.value) || 360;
-  if (video.videoWidth) applyCanvasSize();
-  if (running) { showInfo('画布分辨率已改为 ' + overlay.width + '×' + overlay.height + '（立即生效）'); setTimeout(hideWarn, 2000); }
-});
-
 targetModeEl.addEventListener('change', resetLock);
 
 const savedIp = localStorage.getItem('espIp');
 if (savedIp) espIpEl.value = savedIp;
 espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.value));
 
-['modelType', 'inputSize', 'maxPoses', 'aimPart', 'targetMode', 'inferHz', 'canvasSize'].forEach(id => {
+['modelType', 'inputSize', 'maxPoses', 'aimPart', 'targetMode', 'inferHz'].forEach(id => {
   const el = document.getElementById(id);
   const saved = localStorage.getItem('pref_' + id);
   if (saved !== null && el) el.value = saved;
@@ -1191,7 +1168,6 @@ espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.v
 camResEl.value = 'auto';
 camFacingEl.value = 'user';
 
-// ★ 翻转默认值：优先读上次保存，没有就默认勾选
 const savedFlip = localStorage.getItem('flipEnabled');
 if (savedFlip === null) {
   flipEnabledEl.checked = true;
@@ -1215,7 +1191,6 @@ applyFlip();
 roiEnabled = roiEnabledEl.checked;
 roiPercent = parseInt(roiPercentEl.value);
 INFER_HZ = parseInt(inferHzEl.value) || 10;
-CANVAS_HEIGHT = parseInt(canvasSizeEl.value) || 360;
 roiPercentValEl.textContent = roiPercent + '%';
 updateRoiInfo();
 </script>
