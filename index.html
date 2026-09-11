@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · 流畅版 v3</title>
+<title>视觉跟随 · 流畅版 v4</title>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.15.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js"></script>
 <style>
@@ -11,7 +11,7 @@
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
   h1 { font-size: 1rem; margin: 6px 0; color: #4fc3f7; }
   .video-wrap { position: relative; width: 100%; max-width: 480px; border: 2px solid #4fc3f7; border-radius: 6px; overflow: hidden; background: #000; }
-  video { width: 100%; display: block; }
+  video#video { width: 100%; display: block; }
   canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
   .crosshair { position: absolute; top: 50%; left: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; z-index: 3; }
   .crosshair::before, .crosshair::after { content: ''; position: absolute; background: #ffd54f; box-shadow: 0 0 3px #000; }
@@ -59,10 +59,11 @@
 </head>
 <body>
 
-<h1>视觉跟随 · 流畅版 v3</h1>
+<h1>视觉跟随 · 流畅版 v4</h1>
 
 <div class="video-wrap">
   <video id="video" autoplay playsinline muted></video>
+  <video id="inferVideo" autoplay playsinline muted style="display:none;"></video>
   <canvas id="overlay"></canvas>
   <div class="crosshair"></div>
 </div>
@@ -84,8 +85,10 @@
   <div class="row">
     <label>摄像头</label>
     <select id="camRes">
-      <option value="480">640×480 @ 30fps（最稳，推荐）</option>
-      <option value="720" selected>1280×720 @ 30fps（清晰）</option>
+      <option value="240">320×240 @ 30fps（最省，应急）</option>
+      <option value="360">640×360 @ 30fps（流畅）</option>
+      <option value="480" selected>640×480 @ 30fps（推荐）</option>
+      <option value="720">1280×720 @ 30fps（清晰，可能卡）</option>
       <option value="1080">1920×1080 @ 30fps（最清晰）</option>
     </select>
   </div>
@@ -191,7 +194,6 @@
     <span>锁定: <b id="lockedId">-</b></span>
   </div>
 
-  <!-- ★ 诊断面板 -->
   <div class="perf">
     <span>rAF: <b id="fps">0</b> fps</span>
     <span>摄像头: <b id="videoFps">0</b> fps</span>
@@ -251,6 +253,7 @@ let scaleX = 1, scaleY = 1;
 
 // ============ DOM ============
 const video = document.getElementById('video');
+const inferVideo = document.getElementById('inferVideo');   // ★ 推理专用 video
 const overlay = document.getElementById('overlay');
 const ctx = overlay.getContext('2d', { alpha: true, desynchronized: true });
 const espIpEl = document.getElementById('espIp');
@@ -323,22 +326,38 @@ function sendAim(dx, dy, hasTarget) {
   sentEl.textContent = sentCount;
 }
 
-// ============ 摄像头 ============
+// ============ 摄像头（exact 强制 + 共享流给推理）============
 async function startCamera() {
   const res = camResEl.value;
-  let constraints;
-  if (res === '480') {
-    constraints = { width: { ideal: 640 },  height: { ideal: 480 },  frameRate: { ideal: 30, max: 30 } };
-  } else if (res === '1080') {
-    constraints = { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30, max: 30 } };
-  } else {
-    constraints = { width: { ideal: 1280 }, height: { ideal: 720 },  frameRate: { ideal: 30, max: 30 } };
+  let w, h;
+  if      (res === '240')  { w = 320;  h = 240;  }
+  else if (res === '360')  { w = 640;  h = 360;  }
+  else if (res === '480')  { w = 640;  h = 480;  }
+  else if (res === '1080') { w = 1920; h = 1080; }
+  else                     { w = 1280; h = 720;  }
+
+  // ★ 用 exact 强制分辨率，避免浏览器偷偷降低
+  const constraints = {
+    width:  { exact: w },
+    height: { exact: h },
+    frameRate: { ideal: 30, max: 30 },
+    facingMode: { ideal: 'environment' }
+  };
+
+  // 先关旧流
+  if (videoStream) {
+    videoStream.getTracks().forEach(t => t.stop());
+    videoStream = null;
   }
-  constraints.facingMode = { ideal: 'environment' };
 
   videoStream = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
+
+  // ★ 同一个流喂给两个 video：一个显示、一个推理
   video.srcObject = videoStream;
+  inferVideo.srcObject = videoStream;
+
   await video.play();
+  await inferVideo.play();
 
   applyCanvasSize();
 
@@ -375,7 +394,7 @@ function startVideoFpsMonitor() {
   videoFpsCount = 0;
   videoFpsTimer = performance.now();
   const cb = () => {
-    if (!running && !videoFpsRunning) return;
+    if (!videoFpsRunning) return;
     videoFpsCount++;
     const now = performance.now();
     if (now - videoFpsTimer >= 1000) {
@@ -511,12 +530,12 @@ function selectTarget(candidates, mode, screenCx, screenCy, roi) {
   return { target: selected, lockState: 'off' };
 }
 
-// ============ 推理循环 ============
+// ============ 推理循环（★ 读 inferVideo）============
 async function detectLoop() {
   while (running) {
     const t0 = performance.now();
     try {
-      const poses = await detector.estimatePoses(video, {
+      const poses = await detector.estimatePoses(inferVideo, {   // ★ 用 inferVideo
         maxPoses: parseInt(maxPosesEl.value),
         flipHorizontal: false
       });
@@ -618,9 +637,9 @@ function renderLoop() {
     if (backend !== 'webgl' && backend !== 'webgpu') {
       diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）—— 推理会阻塞主线程！请检查手机是否支持 WebGL。';
     } else if (vidFps > 0 && vidFps < 18) {
-      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 是摄像头慢，把"摄像头"改成 640×480';
+      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 把"摄像头"改成更低一档（320×240 或 640×360）';
     } else if (fps < 30) {
-      diag = '⚠ rAF 只有 ' + fps + ' fps —— 主线程被占，把推理频率降到 6Hz 或画布降一档';
+      diag = '⚠ rAF 只有 ' + fps + ' fps —— 把推理频率降到 6Hz 或画布降一档';
     } else if (infFps < 5 && INFER_HZ >= 8) {
       diag = '⚠ 推理只跑了 ' + infFps + ' Hz（目标 ' + INFER_HZ + '）—— 手机性能不足，降低输入尺寸或改用 SinglePose';
     }
@@ -741,7 +760,6 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
 
 // ============ 创建检测器（强制 WebGL）============
 async function createDetector() {
-  // ★ 关键：强制 WebGL 后端，避免回退到 CPU 阻塞主线程
   try {
     await tf.setBackend('webgl');
     await tf.ready();
@@ -819,6 +837,7 @@ function stopAll() {
     videoStream = null;
   }
   video.srcObject = null;
+  inferVideo.srcObject = null;
   ctx.clearRect(0, 0, overlay.width, overlay.height);
   personCountEl.textContent = '0';
   roiCountEl.textContent = '0';
