@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v27</title>
+<title>视觉跟随 · v28</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -12,7 +12,6 @@
   video#video { width: 100%; display: block; }
   canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
   .video-wrap.flip video, .video-wrap.flip canvas { transform: scaleX(-1); }
-  /* ★ 屏幕中心：小黄点（与绿点等大，直径 10px） */
   .crosshair { position: absolute; top: 50%; left: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px; background: #ffd54f; border-radius: 50%; box-shadow: 0 0 3px #000; pointer-events: none; z-index: 3; }
   .video-wrap .vstatus { position: absolute; left: 4px; bottom: 4px; background: rgba(0,0,0,0.7); color: #7cff7c; font-family: monospace; font-size: 0.62rem; padding: 2px 5px; border-radius: 3px; z-index: 4; pointer-events: none; transform: none !important; }
   .panel { width: 100%; max-width: 480px; margin-top: 8px; background: #16213e; border-radius: 6px; padding: 8px; }
@@ -66,7 +65,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v27</h1>
+<h1>视觉跟随 · v28</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -90,7 +89,6 @@
     <span class="status" id="wsStatus">未连接</span>
   </div>
 
-  <!-- ★★★ 方向修正（关键） -->
   <div class="sec-title">★★ 方向修正（最关键）</div>
   <div class="dir-box">
     <div class="group-label">调对方向的判断：人物在画面右边，光标应该向右移。</div>
@@ -138,8 +136,9 @@
     · 想"瞬间到位"，把死区设为 0，速度设为"瞬间"。
   </div>
   <div class="hint">
-    <b>到位锁定（v27 新增）：</b>当光标距离目标小于 <b>6px</b> 并连续 <b>4 帧</b>保持，就自动锁死不再输出移动；<br>
-    只有目标偏移超过 <b>18px</b>（迟滞解锁）才重新跟随。这能彻底消除到位后的微抖，像锁死一样稳。
+    <b>到位停稳（v28 改进）：</b>采用"渐进阻尼 + 硬停止"，越接近目标输出越小，进入 <b>5px</b> 内直接输出 0，像锁死一样稳。<br>
+    · 不再使用多帧计数和迟滞状态机，避免状态反复切换导致的抖动。<br>
+    · 若感觉接近目标时减速太早，可把死区改成 3px 让它停得远一点。
   </div>
 
   <div class="sec-title">检测设置</div>
@@ -223,7 +222,7 @@
   <div class="row">
     <label>锁定状态</label>
     <span class="lock-badge off" id="lockBadge">未锁定</span>
-    <span class="lock-badge off" id="arriveBadge">未到位</span>
+    <span class="lock-badge off" id="arriveBadge">未停稳</span>
     <button id="btnResetLock" class="warn" style="margin-left:auto; padding:4px 10px; font-size:0.72rem;">重置锁定</button>
   </div>
 
@@ -331,21 +330,22 @@ const MIN_SEND = 1;
 const STILL_DAMPING = 0.4;
 let STILL_THRESHOLD = 30;
 const MOVING_BOOST = 2.0;
-const AIM_SMOOTH_ALPHA = 0.7;
+
+// ★★★ v28 核心：加强瞄准点低通滤波，抑制检测抖动
+const AIM_SMOOTH_ALPHA = 0.82;  // 越大越平滑（原 0.7），对抖动抑制更强
 const LOCK_TIMEOUT_FRAMES = 20;
 
-// ★★★ 到位锁定（迟滞）参数
-const ARRIVE_RADIUS = 6;      // 进入"到位"的偏差半径（像素）
-const LEAVE_RADIUS = 18;      // 离开"到位"的偏差半径（像素），必须大于 ARRIVE_RADIUS 形成迟滞
-const ARRIVE_FRAMES = 4;      // 连续多少帧在到位半径内才锁定
+// ★★★ v28 核心：渐进阻尼 + 硬停止
+const STOP_RADIUS = 5;    // 距离目标小于此值直接输出 0，像锁死
+const SOFT_RADIUS = 35;   // 距离目标小于此值开始线性降低增益（渐进阻尼）
 
-// ★ 离屏推理 canvas
+// 离屏推理 canvas
 const inferCanvas = document.createElement('canvas');
 const inferCtx = inferCanvas.getContext('2d');
 const MAX_INFER_W = 640;
 const MIN_INFER_W = 320;
 
-// ★ 方向开关（默认：X 正转，Y 正转）
+// 方向开关（默认：X 正转，Y 正转）
 let DIR_X_FLIP = false;
 let DIR_Y_FLIP = false;
 
@@ -367,10 +367,6 @@ let videoFpsCount = 0, videoFpsTimer = 0, videoFpsRunning = false;
 
 let lockedBox = null;
 let lockedMissFrames = 0, lockAge = 0;
-
-// ★ 到位锁定状态
-let arrivedFrames = 0;
-let lockedAtTarget = false;
 
 let smoothAimX = 0, smoothAimY = 0;
 let aimInitialized = false;
@@ -809,41 +805,6 @@ function renderLoop() {
     aimInitialized = false;
   }
 
-  // ★★★ 到位锁定（迟滞）判断：用目标原始位置与屏幕中心的几何距离
-  if (hasTarget) {
-    const distToAim = Math.hypot(targetAimX - screenCx, targetAimY - screenCy);
-    if (lockedAtTarget) {
-      // 已锁定：只有偏差超过 LEAVE_RADIUS 才解锁
-      if (distToAim > LEAVE_RADIUS) {
-        lockedAtTarget = false;
-        arrivedFrames = 0;
-      }
-    } else {
-      // 未锁定：连续多帧进入 ARRIVE_RADIUS 才锁定
-      if (distToAim < ARRIVE_RADIUS) {
-        arrivedFrames++;
-        if (arrivedFrames >= ARRIVE_FRAMES) lockedAtTarget = true;
-      } else {
-        arrivedFrames = 0;
-      }
-    }
-  } else {
-    lockedAtTarget = false;
-    arrivedFrames = 0;
-  }
-
-  // 更新到位状态徽章
-  if (lockedAtTarget) {
-    arriveBadge.textContent = '已到位锁死';
-    arriveBadge.className = 'lock-badge arrive';
-  } else if (hasTarget && arrivedFrames > 0) {
-    arriveBadge.textContent = '接近中 ' + arrivedFrames + '/' + ARRIVE_FRAMES;
-    arriveBadge.className = 'lock-badge waiting';
-  } else {
-    arriveBadge.textContent = '未到位';
-    arriveBadge.className = 'lock-badge off';
-  }
-
   if (hasTarget) {
     const dt = (now - lastAimTime) / 1000;
     if (lastAimTime > 0 && dt > 0.001 && dt < 1) {
@@ -858,7 +819,7 @@ function renderLoop() {
   }
 
   let adaptiveGain = MOVE_GAIN;
-  if (hasTarget && !lockedAtTarget) {
+  if (hasTarget) {
     if (MOVE_GAIN < 0.30) {
       if (targetSpeed < STILL_THRESHOLD) adaptiveGain = MOVE_GAIN * STILL_DAMPING;
       else if (targetSpeed > STILL_THRESHOLD * 3) adaptiveGain = MOVE_GAIN * MOVING_BOOST;
@@ -873,21 +834,52 @@ function renderLoop() {
     if (DIR_Y_FLIP) dy = -dy;
   }
 
+  // ★★★ v28 核心：渐进阻尼 + 硬停止
   let sendDx = 0, sendDy = 0;
-  // ★★★ 到位锁定时直接输出 0，不再微调，像锁死一样
-  if (hasTarget && !lockedAtTarget) {
-    if (Math.abs(dx) >= DEAD_ZONE) {
-      sendDx = dx * adaptiveGain;
-      if (Math.abs(sendDx) < MIN_SEND) sendDx = (dx > 0 ? MIN_SEND : -MIN_SEND);
+  let stopped = false;
+  if (hasTarget) {
+    const dist = Math.hypot(dx, dy);
+
+    if (dist < STOP_RADIUS) {
+      // 进入极小半径：直接锁死，不再输出任何移动
+      sendDx = 0; sendDy = 0;
+      stopped = true;
+    } else if (dist < DEAD_ZONE) {
+      // 死区（若用户设置了大于 0 的死区）
+      sendDx = 0; sendDy = 0;
+      stopped = true;
+    } else {
+      // 渐进阻尼因子：距离越近，输出越小，平滑过渡到 0
+      let distFactor = 1;
+      if (dist < SOFT_RADIUS) {
+        distFactor = (dist - STOP_RADIUS) / (SOFT_RADIUS - STOP_RADIUS);
+        if (distFactor < 0) distFactor = 0;
+        if (distFactor > 1) distFactor = 1;
+      }
+
+      let rawDx = dx * adaptiveGain * distFactor;
+      let rawDy = dy * adaptiveGain * distFactor;
+
+      // 保底最小步进（避免极慢速时完全不动）
+      if (Math.abs(rawDx) > 0.01 && Math.abs(rawDx) < MIN_SEND) rawDx = (rawDx > 0 ? MIN_SEND : -MIN_SEND);
+      if (Math.abs(rawDy) > 0.01 && Math.abs(rawDy) < MIN_SEND) rawDy = (rawDy > 0 ? MIN_SEND : -MIN_SEND);
+
+      sendDx = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, rawDx));
+      sendDy = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, rawDy));
     }
-    if (Math.abs(dy) >= DEAD_ZONE) {
-      sendDy = dy * adaptiveGain;
-      if (Math.abs(sendDy) < MIN_SEND) sendDy = (dy > 0 ? MIN_SEND : -MIN_SEND);
-    }
-    sendDx = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, sendDx));
-    sendDy = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, sendDy));
   }
-  // 到位锁定 → sendDx = sendDy = 0
+
+  // 更新停稳徽章
+  if (hasTarget && stopped) {
+    arriveBadge.textContent = '已停稳';
+    arriveBadge.className = 'lock-badge arrive';
+  } else if (hasTarget) {
+    arriveBadge.textContent = '跟随中';
+    arriveBadge.className = 'lock-badge waiting';
+  } else {
+    arriveBadge.textContent = '未停稳';
+    arriveBadge.className = 'lock-badge off';
+  }
 
   dxEl.textContent = Math.round(sendDx);
   dyEl.textContent = Math.round(sendDy);
@@ -1051,7 +1043,6 @@ async function startAll() {
     }
 
     lockedBox = null; lockedMissFrames = 0; lockAge = 0;
-    arrivedFrames = 0; lockedAtTarget = false;
     latestPersons = []; latestPersonsTime = 0; lastDrawnTime = 0;
     smoothAimX = 0; smoothAimY = 0; aimInitialized = false;
     lastAimX = 0; lastAimY = 0; lastAimTime = 0; targetSpeed = 0;
@@ -1079,19 +1070,17 @@ function stopAll() {
   fpsEl.textContent = '0'; videoFpsEl.textContent = '0'; inferFpsEl.textContent = '0';
   dxEl.textContent = '0'; dyEl.textContent = '0';
   latestPersons = []; lockedBox = null; lockedMissFrames = 0; lockAge = 0;
-  arrivedFrames = 0; lockedAtTarget = false;
   aimInitialized = false; targetSpeed = 0;
   vstatusEl.textContent = '已停止'; vstatusEl.style.color = '#ffb74d';
-  arriveBadge.textContent = '未到位'; arriveBadge.className = 'lock-badge off';
+  arriveBadge.textContent = '未停稳'; arriveBadge.className = 'lock-badge off';
 
   if (tfReady()) setTimeout(() => prewarmModel(), 500);
 }
 
 function resetLock() {
   lockedBox = null; lockedMissFrames = 0; lockAge = 0;
-  arrivedFrames = 0; lockedAtTarget = false;
   lockBadge.textContent = '未锁定'; lockBadge.className = 'lock-badge off';
-  arriveBadge.textContent = '未到位'; arriveBadge.className = 'lock-badge off';
+  arriveBadge.textContent = '未停稳'; arriveBadge.className = 'lock-badge off';
 }
 
 async function reopenCamera() {
