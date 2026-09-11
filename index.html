@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v20</title>
+<title>视觉跟随 · v21 自适应</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -71,7 +71,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v20</h1>
+<h1>视觉跟随 · v21 自适应</h1>
 
 <div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
@@ -95,15 +95,15 @@
     <span class="status" id="wsStatus">未连接</span>
   </div>
 
-  <div class="sec-title">★ 光标跟随速度（关键）</div>
+  <div class="sec-title">★ 跟随调参</div>
   <div class="row">
     <label>速度</label>
     <select id="moveSpeed">
-      <option value="0.03">很慢（0.03）</option>
-      <option value="0.05" selected>慢（0.05，推荐先试）</option>
-      <option value="0.08">中（0.08）</option>
-      <option value="0.12">快（0.12）</option>
-      <option value="0.20">很快（0.20）</option>
+      <option value="0.02">极慢（0.02）</option>
+      <option value="0.03" selected>慢（0.03，推荐）</option>
+      <option value="0.05">中（0.05）</option>
+      <option value="0.08">快（0.08）</option>
+      <option value="0.12">很快（0.12）</option>
     </select>
   </div>
   <div class="row">
@@ -116,27 +116,35 @@
       <option value="12">12 px（很稳）</option>
     </select>
   </div>
+  <div class="row">
+    <label>静止阈值</label>
+    <select id="stillThreshold">
+      <option value="10">10 px/s（目标几乎不动就算静止）</option>
+      <option value="30" selected>30 px/s（推荐）</option>
+      <option value="60">60 px/s（宽松）</option>
+      <option value="100">100 px/s（几乎总在动）</option>
+    </select>
+  </div>
   <div class="row" style="font-size:0.65rem;color:#9bc4e2;line-height:1.3;">
-    光标乱动 → 速度调低 / 死区调大；光标跟不上 → 速度调高
+    自适应：目标静止时速度自动降 85%，目标移动时正常追。死区越大越稳。
   </div>
 
   <div class="sec-title">检测设置</div>
   <div class="row">
     <label>镜头</label>
     <select id="camFacing">
-      <option value="user" selected>前置（默认，流畅）</option>
-      <option value="environment">后置（可能卡）</option>
+      <option value="user" selected>前置（默认）</option>
+      <option value="environment">后置</option>
     </select>
   </div>
   <div class="row">
     <label>摄像头</label>
     <select id="camRes">
-      <option value="auto" selected>自动适配（推荐）</option>
-      <option value="240">320×240（最省）</option>
+      <option value="auto" selected>自动适配</option>
+      <option value="240">320×240</option>
       <option value="360">640×360</option>
       <option value="480">640×480</option>
       <option value="720">1280×720</option>
-      <option value="1080">1920×1080</option>
     </select>
     <button id="btnReopen" class="ghost" style="flex:0 0 auto; padding:4px 8px; font-size:0.7rem;">重开</button>
   </div>
@@ -221,7 +229,7 @@
   <div class="stat" style="margin-top:4px;">
     <span>dx: <b id="dx">0</b></span>
     <span>dy: <b id="dy">0</b></span>
-    <span>置信度: <b id="lockedId">-</b></span>
+    <span>目标速度: <b id="lockedId">-</b></span>
   </div>
 
   <div class="perf">
@@ -310,12 +318,14 @@ const WS_PORT = 81;
 const SEND_HZ = 30;
 let   INFER_HZ = 8;
 
-// ★ 核心参数：光标跟随速度
-const SMOOTH_ALPHA = 0.75;      // 高平滑（0.75 = 75% 保留旧值，减少抖动）
-const MAX_MOVE_PER_FRAME = 40;  // 单帧最大移动 40px
-let   MOVE_GAIN = 0.05;         // 速度系数（每帧发送 = dx × gain）
-let   DEAD_ZONE = 3;            // 死区（小于此值不发）
-
+// 自适应速度参数
+let MOVE_GAIN = 0.03;          // 基础速度
+let DEAD_ZONE = 3;             // 死区
+let STILL_THRESHOLD = 30;      // 目标"静止"的速度阈值 px/s
+const STILL_DAMPING = 0.15;    // 静止时速度降为 15%
+const MOVING_BOOST = 2.5;      // 移动时速度升为 250%
+const MAX_MOVE_PER_FRAME = 25; // 单帧最大移动
+const AIM_SMOOTH_ALPHA = 0.7;  // 瞄准点平滑
 const LOCK_TIMEOUT_FRAMES = 20;
 
 const MODE_LOCKED    = 'locked';
@@ -337,14 +347,26 @@ let fpsCount = 0;
 let fpsTimer = 0;
 let inferCount = 0;
 let inferTimer = 0;
-let smoothDx = 0, smoothDy = 0;
 let videoFpsCount = 0;
 let videoFpsTimer = 0;
 let videoFpsRunning = false;
 
+// 锁定状态
 let lockedBox = null;
 let lockedMissFrames = 0;
 let lockAge = 0;
+
+// 瞄准点平滑
+let smoothAimX = 0, smoothAimY = 0;
+let aimInitialized = false;
+
+// 目标速度追踪
+let lastAimX = 0, lastAimY = 0;
+let lastAimTime = 0;
+let targetSpeed = 0;   // px/s
+
+// 发送平滑
+let smoothSendDx = 0, smoothSendDy = 0;
 
 let roiEnabled = true;
 let roiPercent = 60;
@@ -354,7 +376,6 @@ let latestPersonsTime = 0;
 let lastDrawnTime = 0;
 
 let actualFacing = '';
-let mirrored = false;
 
 let prewarmedDetector = null;
 let prewarmKey = '';
@@ -393,6 +414,7 @@ const camResEl = document.getElementById('camRes');
 const camFacingEl = document.getElementById('camFacing');
 const moveSpeedEl = document.getElementById('moveSpeed');
 const deadZoneEl = document.getElementById('deadZone');
+const stillThresholdEl = document.getElementById('stillThreshold');
 const roiEnabledEl = document.getElementById('roiEnabled');
 const roiPercentEl = document.getElementById('roiPercent');
 const roiPercentValEl = document.getElementById('roiPercentVal');
@@ -410,20 +432,22 @@ const libStatusEl = document.getElementById('libStatus');
 // ============================================================
 function showError(msg) { warnBox.textContent = msg; warnBox.className = 'warn-box show err'; }
 function showInfo(msg)  { warnBox.textContent = msg; warnBox.className = 'warn-box show'; }
-function showOk(msg)    { warnBox.textContent = msg; warnBox.className = 'warn-box show ok'; }
 function hideWarn()     { warnBox.className = 'warn-box'; }
 function tfReady()      { return (typeof window.tf !== 'undefined' && typeof window.cocoSsd !== 'undefined'); }
 function setLibStatus(msg, cls) { libStatusEl.textContent = msg; libStatusEl.className = 'lib-status' + (cls ? ' ' + cls : ''); }
 
+// ★ 关键：是否镜像，直接读下拉框，不用缓存变量
+function isMirrored() {
+  return camFacingEl.value === 'user';
+}
+
 function updateMirror() {
-  mirrored = (actualFacing === 'user');
-  if (mirrored) videoWrap.classList.add('flip');
+  if (isMirrored()) videoWrap.classList.add('flip');
   else videoWrap.classList.remove('flip');
-  console.log('[Mirror]', mirrored ? 'ON (前置)' : 'OFF (后置/未知)');
 }
 
 function drawText(text, visualX, visualY) {
-  if (mirrored) {
+  if (isMirrored()) {
     const cx = overlay.width - visualX;
     ctx.save();
     ctx.translate(cx, visualY);
@@ -468,22 +492,14 @@ function sendAim(dx, dy, hasTarget) {
 // ============================================================
 async function prewarmModel() {
   if (!tfReady()) return;
-
   const key = 'coco-ssd-lite';
   if (prewarmedDetector && prewarmKey === key) return;
-  if (prewarmPromise && prewarmKey === key) {
-    try { await prewarmPromise; } catch (e) {}
-    return;
-  }
-
-  if (prewarmedDetector) {
-    try { prewarmedDetector.dispose(); } catch (e) {}
-    prewarmedDetector = null;
-  }
+  if (prewarmPromise && prewarmKey === key) { try { await prewarmPromise; } catch (e) {} return; }
+  if (prewarmedDetector) { try { prewarmedDetector.dispose(); } catch (e) {} prewarmedDetector = null; }
 
   prewarmKey = key;
   prewarmStatus = 'loading';
-  setLibStatus('⏳ 后台预热 COCO-SSD 模型中（首次约 5~15 秒）...');
+  setLibStatus('⏳ 后台预热 COCO-SSD 模型中...');
 
   prewarmPromise = (async () => {
     try {
@@ -491,7 +507,6 @@ async function prewarmModel() {
       const backend = tf.getBackend();
       tfBackendEl.textContent = backend;
       tfBackendEl.className = (backend === 'webgl' || backend === 'webgpu') ? '' : 'bad';
-
       const det = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
       prewarmedDetector = det;
       prewarmStatus = 'ready';
@@ -521,76 +536,47 @@ async function startCamera() {
   const mode = camResEl.value;
   const facing = camFacingEl.value;
 
-  if (videoStream) {
-    try { videoStream.getTracks().forEach(t => t.stop()); } catch (e) {}
-    videoStream = null;
-  }
+  if (videoStream) { try { videoStream.getTracks().forEach(t => t.stop()); } catch (e) {} videoStream = null; }
   video.srcObject = null;
 
   vstatusEl.textContent = '打开摄像头中...';
   vstatusEl.style.color = '#ffb74d';
 
   const candidates = (mode === 'auto')
-    ? [
-        { w: 320, h: 240, label: '320×240' },
-        { w: 640, h: 360, label: '640×360' },
-        { w: 640, h: 480, label: '640×480' },
-        { w: 1280, h: 720, label: '1280×720' }
-      ]
+    ? [{ w: 320, h: 240 }, { w: 640, h: 360 }, { w: 640, h: 480 }, { w: 1280, h: 720 }]
     : [{ w: parseInt(mode) === 240 ? 320 : parseInt(mode) === 360 ? 640 : parseInt(mode) === 480 ? 640 : parseInt(mode) === 720 ? 1280 : 1920,
-         h: parseInt(mode) === 240 ? 240 : parseInt(mode) === 360 ? 360 : parseInt(mode) === 480 ? 480 : parseInt(mode) === 720 ? 720 : 1080,
-         label: mode + 'p' }];
+         h: parseInt(mode) === 240 ? 240 : parseInt(mode) === 360 ? 360 : parseInt(mode) === 480 ? 480 : parseInt(mode) === 720 ? 720 : 1080 }];
 
   let stream = null;
-
   for (const c of candidates) {
-    const constraints = {
-      facingMode: { ideal: facing },
-      width: { ideal: c.w },
-      height: { ideal: c.h },
-      frameRate: { ideal: 30, max: 30 }
-    };
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facing }, width: { ideal: c.w }, height: { ideal: c.h }, frameRate: { ideal: 30, max: 30 } },
+        audio: false
+      });
       const settings = stream.getVideoTracks()[0].getSettings();
-      console.log('[Camera] ✅ ' + c.label + ' -> ' + settings.width + '×' + settings.height);
       actualFacing = settings.facingMode || '';
+      console.log('[Camera] OK', settings.width + '×' + settings.height);
       break;
-    } catch (e) {
-      console.warn('[Camera] ' + c.label + ' FAIL: ' + e.name);
-      stream = null;
-    }
+    } catch (e) { stream = null; }
   }
 
   if (!stream) {
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facing } }, audio: false });
-      actualFacing = stream.getVideoTracks()[0].getSettings().facingMode || '';
-    } catch (e) {
-      try {
-        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        actualFacing = stream.getVideoTracks()[0].getSettings().facingMode || '';
-      } catch (e2) {
-        vstatusEl.textContent = '打开失败';
-        vstatusEl.style.color = '#ff5252';
-        let reason = '';
-        if (e2.name === 'NotAllowedError') reason = '你拒绝了摄像头权限。请点地址栏🔒 → 网站设置 → 摄像头 → 允许，然后刷新页面。';
-        else if (e2.name === 'NotFoundError') reason = '找不到摄像头设备。';
-        else if (e2.name === 'NotReadableError') reason = '摄像头被其它 App 占用了。';
-        else reason = e2.name + ' / ' + e2.message;
-        showError('摄像头打开失败：' + reason);
+    try { stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facing } }, audio: false }); }
+    catch (e) {
+      try { stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false }); }
+      catch (e2) {
+        vstatusEl.textContent = '打开失败'; vstatusEl.style.color = '#ff5252';
+        showError('摄像头打开失败：' + e2.name);
         throw e2;
       }
     }
+    actualFacing = stream.getVideoTracks()[0].getSettings().facingMode || '';
   }
 
   videoStream = stream;
   video.srcObject = stream;
-
-  try { await video.play(); } catch (e) {
-    await new Promise(r => setTimeout(r, 100));
-    try { await video.play(); } catch (e2) {}
-  }
+  try { await video.play(); } catch (e) { await new Promise(r => setTimeout(r, 100)); try { await video.play(); } catch (e2) {} }
 
   if (video.videoWidth === 0) {
     await new Promise(resolve => {
@@ -598,21 +584,12 @@ async function startCamera() {
       const finish = () => { if (!done) { done = true; resolve(); } };
       video.addEventListener('loadedmetadata', finish, { once: true });
       setTimeout(finish, 1500);
-      const check = () => {
-        if (done) return;
-        if (video.videoWidth > 0 && video.videoHeight > 0) finish();
-        else setTimeout(check, 50);
-      };
+      const check = () => { if (done) return; if (video.videoWidth > 0) finish(); else setTimeout(check, 50); };
       check();
     });
   }
 
-  if (video.videoWidth === 0) {
-    vstatusEl.textContent = '无画面';
-    vstatusEl.style.color = '#ff5252';
-    showError('摄像头打开了但没画面。请点"重开"按钮。');
-    return;
-  }
+  if (video.videoWidth === 0) { vstatusEl.textContent = '无画面'; vstatusEl.style.color = '#ff5252'; return; }
 
   overlay.width  = video.videoWidth;
   overlay.height = video.videoHeight;
@@ -623,7 +600,7 @@ async function startCamera() {
   updateMirror();
 
   const facingLabel = (actualFacing === 'user') ? '前置' : (actualFacing === 'environment') ? '后置' : '未知';
-  vstatusEl.textContent = video.videoWidth + '×' + video.videoHeight + ' · ' + facingLabel + (mirrored ? ' · 已翻转' : '');
+  vstatusEl.textContent = video.videoWidth + '×' + video.videoHeight + ' · ' + facingLabel + (isMirrored() ? ' · 已翻转' : '');
   vstatusEl.style.color = '#7cff7c';
 
   startVideoFpsMonitor();
@@ -631,11 +608,7 @@ async function startCamera() {
 
 function startVideoFpsMonitor() {
   videoFpsRunning = false;
-  if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype)) {
-    videoFpsEl.textContent = 'N/A';
-    videoFpsEl.className = 'warn';
-    return;
-  }
+  if (!('requestVideoFrameCallback' in HTMLVideoElement.prototype)) { videoFpsEl.textContent = 'N/A'; return; }
   videoFpsRunning = true;
   videoFpsCount = 0;
   videoFpsTimer = performance.now();
@@ -647,8 +620,7 @@ function startVideoFpsMonitor() {
       const f = videoFpsCount;
       videoFpsEl.textContent = f;
       videoFpsEl.className = (f < 15) ? 'bad' : (f < 25) ? 'warn' : '';
-      videoFpsCount = 0;
-      videoFpsTimer = now;
+      videoFpsCount = 0; videoFpsTimer = now;
     }
     video.requestVideoFrameCallback(cb);
   };
@@ -660,13 +632,7 @@ function startVideoFpsMonitor() {
 // ============================================================
 function convertDetection(d) {
   const [bx, by, bw, bh] = d.bbox;
-  return {
-    x1: bx, y1: by,
-    x2: bx + bw, y2: by + bh,
-    cx: bx + bw / 2, cy: by + bh / 2,
-    w: bw, h: bh,
-    score: d.score
-  };
+  return { x1: bx, y1: by, x2: bx + bw, y2: by + bh, cx: bx + bw / 2, cy: by + bh / 2, w: bw, h: bh, score: d.score };
 }
 
 function getAimPoint(box, part) {
@@ -683,11 +649,7 @@ function computeScore(c, screenCx, screenCy) {
   const lowScore = Math.min(c.y2 / (screenCy * 2), 1);
   const maxArea = screenCx * screenCy * 0.5;
   const sizeScore = Math.min(Math.sqrt(c.w * c.h) / Math.sqrt(maxArea), 1);
-  const confScore = c.score;
-  return {
-    score: distScore * 0.45 + lowScore * 0.20 + sizeScore * 0.20 + confScore * 0.15,
-    distToCross
-  };
+  return { score: distScore * 0.45 + lowScore * 0.20 + sizeScore * 0.20 + c.score * 0.15, distToCross };
 }
 
 function inROI(point, roi) {
@@ -701,81 +663,49 @@ function inROI(point, roi) {
 function selectTarget(candidates, mode, screenCx, screenCy, roi) {
   const part = aimPartEl.value;
 
-  // ---- 锁定模式：和 lockedBox 最近匹配 ----
   if (mode === MODE_LOCKED && lockedBox !== null) {
-    let best = null;
-    let bestDist = Infinity;
-    // ★ 收紧匹配阈值：0.8 倍框大小（防止误锁到旁边的人）
-    const maxDist = Math.max(lockedBox.w, lockedBox.h) * 0.8;
+    let best = null, bestDist = Infinity;
+    // 动态阈值：框越大允许偏移越大
+    const maxDist = Math.max(lockedBox.w, lockedBox.h) * 1.0;
     for (const c of candidates) {
       const d = Math.hypot(c.cx - lockedBox.cx, c.cy - lockedBox.cy);
-      if (d < maxDist && d < bestDist) {
-        bestDist = d;
-        best = c;
-      }
+      if (d < maxDist && d < bestDist) { bestDist = d; best = c; }
     }
     if (best) {
-      // 平滑更新锁定框位置（避免位置跳变）
+      // 平滑更新锁定位置
       lockedBox = {
-        cx: lockedBox.cx * 0.5 + best.cx * 0.5,
-        cy: lockedBox.cy * 0.5 + best.cy * 0.5,
-        w: lockedBox.w * 0.5 + best.w * 0.5,
-        h: lockedBox.h * 0.5 + best.h * 0.5
+        cx: lockedBox.cx * 0.6 + best.cx * 0.4,
+        cy: lockedBox.cy * 0.6 + best.cy * 0.4,
+        w: lockedBox.w * 0.6 + best.w * 0.4,
+        h: lockedBox.h * 0.6 + best.h * 0.4
       };
-      lockedMissFrames = 0;
-      lockAge++;
+      lockedMissFrames = 0; lockAge++;
       return { target: best, lockState: 'active' };
     }
     lockedMissFrames++;
-    if (lockedMissFrames > LOCK_TIMEOUT_FRAMES) {
-      lockedBox = null; lockedMissFrames = 0; lockAge = 0;
-    } else {
-      return { target: null, lockState: 'waiting' };
-    }
+    if (lockedMissFrames > LOCK_TIMEOUT_FRAMES) { lockedBox = null; lockedMissFrames = 0; lockAge = 0; }
+    else return { target: null, lockState: 'waiting' };
   }
 
-  const eligible = roiEnabled
-    ? candidates.filter(c => inROI(getAimPoint(c, part), roi))
-    : candidates.slice();
-
+  const eligible = roiEnabled ? candidates.filter(c => inROI(getAimPoint(c, part), roi)) : candidates.slice();
   if (eligible.length === 0) return { target: null, lockState: 'off' };
-
-  for (const c of eligible) {
-    const s = computeScore(c, screenCx, screenCy);
-    c.score = s.score;
-    c.distToCross = s.distToCross;
-  }
+  for (const c of eligible) { const s = computeScore(c, screenCx, screenCy); c.score = s.score; c.distToCross = s.distToCross; }
 
   let selected;
   switch (mode) {
-    case MODE_CROSSHAIR:
-      eligible.sort((a, b) => a.distToCross - b.distToCross);
-      selected = eligible[0];
-      break;
-    case MODE_LOWEST:
-      eligible.sort((a, b) => b.y2 - a.y2);
-      selected = eligible[0];
-      break;
-    case MODE_LARGEST:
-      eligible.sort((a, b) => (b.w * b.h) - (a.w * a.h));
-      selected = eligible[0];
-      break;
+    case MODE_CROSSHAIR: eligible.sort((a, b) => a.distToCross - b.distToCross); selected = eligible[0]; break;
+    case MODE_LOWEST:    eligible.sort((a, b) => b.y2 - a.y2); selected = eligible[0]; break;
+    case MODE_LARGEST:   eligible.sort((a, b) => (b.w * b.h) - (a.w * a.h)); selected = eligible[0]; break;
     case MODE_LOCKED:
-    default:
-      eligible.sort((a, b) => b.score - a.score);
-      selected = eligible[0];
-      break;
+    default:             eligible.sort((a, b) => b.score - a.score); selected = eligible[0]; break;
   }
-
   if (!selected) return { target: null, lockState: 'off' };
 
   if (mode === MODE_LOCKED) {
     lockedBox = { cx: selected.cx, cy: selected.cy, w: selected.w, h: selected.h };
-    lockedMissFrames = 0;
-    lockAge = 0;
+    lockedMissFrames = 0; lockAge = 0;
     return { target: selected, lockState: 'active' };
   }
-
   return { target: selected, lockState: 'off' };
 }
 
@@ -789,13 +719,8 @@ async function detectLoop() {
       if (tfReady() && detector && video.readyState >= 2 && video.videoWidth > 0) {
         const maxBoxes = parseInt(maxPosesEl.value) || 3;
         const minScore = parseFloat(minScoreEl.value) || 0.3;
-
         const predictions = await detector.detect(video, maxBoxes, minScore);
-
-        const persons = predictions
-          .filter(p => p.class === 'person' && p.score >= minScore)
-          .map(convertDetection);
-
+        const persons = predictions.filter(p => p.class === 'person' && p.score >= minScore).map(convertDetection);
         latestPersons = persons;
         latestPersonsTime = performance.now();
         inferCount++;
@@ -806,8 +731,7 @@ async function detectLoop() {
     if (now - inferTimer >= 1000) { inferFpsEl.textContent = inferCount; inferCount = 0; inferTimer = now; }
 
     const elapsed = performance.now() - t0;
-    const targetInterval = 1000 / INFER_HZ;
-    const wait = Math.max(0, targetInterval - elapsed);
+    const wait = Math.max(0, (1000 / INFER_HZ) - elapsed);
     await new Promise(r => setTimeout(r, wait));
   }
 }
@@ -839,45 +763,82 @@ function renderLoop() {
   else if (result.lockState === 'waiting') { lockBadge.textContent = '等待目标... (' + lockedMissFrames + '/' + LOCK_TIMEOUT_FRAMES + ')'; lockBadge.className = 'lock-badge waiting'; }
   else { lockBadge.textContent = '未锁定'; lockBadge.className = 'lock-badge off'; }
 
-  let dx = 0, dy = 0, hasTarget = 0;
+  // ★ 计算目标位置（平滑后的）
+  let targetAimX = 0, targetAimY = 0;
+  let hasTarget = 0;
+
   if (target) {
     hasTarget = 1;
-    const aim = getAimPoint(target, part);
-    dx = aim.x - screenCx;
-    dy = aim.y - screenCy;
-    if (mirrored) dx = -dx;
-    lockedIdEl.textContent = Math.round(target.score * 100) + '%';
+    const rawAim = getAimPoint(target, part);
+
+    // 瞄准点 EMA 平滑（防 bbox 突变）
+    if (!aimInitialized) {
+      smoothAimX = rawAim.x;
+      smoothAimY = rawAim.y;
+      aimInitialized = true;
+    } else {
+      smoothAimX = smoothAimX * AIM_SMOOTH_ALPHA + rawAim.x * (1 - AIM_SMOOTH_ALPHA);
+      smoothAimY = smoothAimY * AIM_SMOOTH_ALPHA + rawAim.y * (1 - AIM_SMOOTH_ALPHA);
+    }
+    targetAimX = smoothAimX;
+    targetAimY = smoothAimY;
   } else {
-    lockedIdEl.textContent = lockedBox !== null ? '锁定中' : '-';
+    aimInitialized = false;
   }
 
-  // ★ 平滑
+  // ★ 计算目标速度（帧间位移）
   if (hasTarget) {
-    smoothDx = smoothDx * SMOOTH_ALPHA + dx * (1 - SMOOTH_ALPHA);
-    smoothDy = smoothDy * SMOOTH_ALPHA + dy * (1 - SMOOTH_ALPHA);
+    const dt = (now - lastAimTime) / 1000;   // 秒
+    if (lastAimTime > 0 && dt > 0.001 && dt < 1) {
+      const dxMove = targetAimX - lastAimX;
+      const dyMove = targetAimY - lastAimY;
+      const instantSpeed = Math.hypot(dxMove, dyMove) / dt;
+      // EMA 平滑速度
+      targetSpeed = targetSpeed * 0.7 + instantSpeed * 0.3;
+    }
+    lastAimX = targetAimX;
+    lastAimY = targetAimY;
+    lastAimTime = now;
   } else {
-    smoothDx = 0;
-    smoothDy = 0;
+    targetSpeed = 0;
+    lastAimTime = 0;
   }
 
-  // ★★★ 关键修复：缩放 + 死区 + 饱和 ★★★
+  // ★ 根据目标速度计算"自适应增益"
+  let adaptiveGain = MOVE_GAIN;
+  if (hasTarget) {
+    if (targetSpeed < STILL_THRESHOLD) {
+      // 目标"静止" → 极低增益（几乎不动）
+      adaptiveGain = MOVE_GAIN * STILL_DAMPING;
+    } else if (targetSpeed > STILL_THRESHOLD * 3) {
+      // 目标"快速移动" → 增益升
+      adaptiveGain = MOVE_GAIN * MOVING_BOOST;
+    }
+  }
+
+  // 计算偏移
+  let dx = 0, dy = 0;
+  if (hasTarget) {
+    dx = targetAimX - screenCx;
+    dy = targetAimY - screenCy;
+    // ★ 镜像：直接读下拉框，不用缓存变量
+    if (isMirrored()) dx = -dx;
+  }
+
+  // 死区
   let sendDx = 0, sendDy = 0;
   if (hasTarget) {
-    // 1. 缩放：每帧只发送 dx × gain
-    sendDx = smoothDx * MOVE_GAIN;
-    sendDy = smoothDy * MOVE_GAIN;
+    if (Math.abs(dx) >= DEAD_ZONE) sendDx = dx * adaptiveGain;
+    if (Math.abs(dy) >= DEAD_ZONE) sendDy = dy * adaptiveGain;
 
-    // 2. 死区：偏移小于阈值 → 不动
-    if (Math.abs(smoothDx) < DEAD_ZONE) sendDx = 0;
-    if (Math.abs(smoothDy) < DEAD_ZONE) sendDy = 0;
-
-    // 3. 饱和：单帧最多 MAX_MOVE_PER_FRAME 像素
+    // 饱和
     sendDx = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, sendDx));
     sendDy = Math.max(-MAX_MOVE_PER_FRAME, Math.min(MAX_MOVE_PER_FRAME, sendDy));
   }
 
   dxEl.textContent = Math.round(sendDx);
   dyEl.textContent = Math.round(sendDy);
+  lockedIdEl.textContent = Math.round(targetSpeed) + ' px/s';
 
   const interval = 1000 / SEND_HZ;
   if (now - lastSendTime >= interval) {
@@ -897,13 +858,11 @@ function renderLoop() {
     const backend = tfReady() && tf.getBackend ? tf.getBackend() : '?';
 
     let diag = null;
-    if (video.videoWidth === 0) diag = '⚠ 摄像头没有画面。请点"重开"按钮。';
-    else if (backend === '?') diag = '⏳ TF 库还在加载中，请稍等...';
-    else if (backend !== 'webgl' && backend !== 'webgpu') diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）';
+    if (video.videoWidth === 0) diag = '⚠ 摄像头没有画面。';
+    else if (backend !== 'webgl' && backend !== 'webgpu') diag = '⚠ TF 后端不是 webgl';
     else if (vidFps > 0 && vidFps < 15) diag = '⚠ 摄像头只有 ' + vidFps + ' fps';
     else if (fps < 30) diag = '⚠ rAF 只有 ' + fps + ' fps';
-    else if (infFps < 3 && INFER_HZ >= 8) diag = '⚠ 推理只跑了 ' + infFps + ' Hz';
-    else if (latestPersons.length === 0) diag = '⚠ 当前没检测到"人"。试试：① 靠近屏幕 ② 置信度降到 0.2';
+    else if (latestPersons.length === 0) diag = '⚠ 当前没检测到"人"。试试靠近屏幕 / 置信度降到 0.2';
 
     if (diag) { warnBox.textContent = diag; warnBox.className = 'warn-box show err'; }
     else { warnBox.className = 'warn-box'; }
@@ -926,23 +885,21 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
   const persons = latestPersons;
   personCountEl.textContent = persons.length;
 
+  // 所有候选
   ctx.strokeStyle = 'rgba(255,255,255,0.35)';
   ctx.lineWidth = 1;
   ctx.setLineDash([3, 3]);
-  for (const p of persons) {
-    ctx.strokeRect(p.x1, p.y1, p.w, p.h);
-  }
+  for (const p of persons) ctx.strokeRect(p.x1, p.y1, p.w, p.h);
   ctx.setLineDash([]);
 
+  // ROI 遮罩
   if (roiEnabled) {
     ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
     ctx.fillRect(0, 0, cw, roi.y1);
     ctx.fillRect(0, roi.y2, cw, ch - roi.y2);
     ctx.fillRect(0, roi.y1, roi.x1, roiH);
     ctx.fillRect(roi.x2, roi.y1, cw - roi.x2, roiH);
-  }
 
-  if (roiEnabled) {
     ctx.strokeStyle = 'rgba(255,82,82,0.85)';
     ctx.lineWidth = 2;
     ctx.setLineDash([6, 4]);
@@ -953,20 +910,18 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     drawText('ROI ' + roiPercent + '%', roi.x1 + 4, roi.y1 + 11);
   }
 
+  // 选目标
   const mode = targetModeEl.value;
   const result = selectTarget(persons, mode, screenCx, screenCy, roi);
   const target = result.target;
 
   let roiCount = 0;
-  for (const p of persons) {
-    if (!roiEnabled || inROI(getAimPoint(p, part), roi)) roiCount++;
-  }
+  for (const p of persons) if (!roiEnabled || inROI(getAimPoint(p, part), roi)) roiCount++;
   roiCountEl.textContent = roiCount;
 
   if (target) {
     ctx.strokeStyle = '#ffd54f';
     ctx.lineWidth = 2;
-    ctx.setLineDash([]);
     ctx.strokeRect(target.x1, target.y1, target.w, target.h);
 
     const aim = getAimPoint(target, part);
@@ -978,26 +933,9 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    ctx.strokeStyle = 'rgba(255,213,79,0.55)';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.moveTo(aim.x, aim.y);
-    ctx.lineTo(screenCx, screenCy);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
     ctx.fillStyle = '#ffd54f';
     ctx.font = 'bold 11px monospace';
-    const label = Math.round(target.score * 100) + '%';
-    drawText(label, cw - target.x2, target.y1 - 4);
-  } else if (persons.length > 0) {
-    ctx.save();
-    ctx.fillStyle = 'rgba(255,82,82,0.85)';
-    ctx.font = 'bold 22px monospace';
-    ctx.textAlign = 'center';
-    drawText('STOP', cw / 2, ch / 2 - 20);
-    ctx.restore();
+    drawText(Math.round(target.score * 100) + '%', cw - target.x2, target.y1 - 4);
   }
 }
 
@@ -1005,8 +943,8 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
 // 创建检测器
 // ============================================================
 async function createDetector() {
-  if (!tfReady()) throw new Error('TensorFlow.js 库未加载');
-  try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) { console.warn('WebGL fallback', e); }
+  if (!tfReady()) throw new Error('库未加载');
+  try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) {}
   const backend = tf.getBackend();
   tfBackendEl.textContent = backend;
   tfBackendEl.className = (backend === 'webgl' || backend === 'webgpu') ? '' : 'bad';
@@ -1019,7 +957,6 @@ async function createDetector() {
 async function startAll() {
   if (running) return;
   if (!wsConnected) { alert('请先点"连接"'); return; }
-
   btnStart.disabled = true;
 
   if (!tfReady()) {
@@ -1027,12 +964,12 @@ async function startAll() {
     try {
       const ok = await window.libsPromise;
       if (!ok || !tfReady()) {
-        showError('库加载失败。请检查网络，刷新页面后重试。');
+        showError('库加载失败。请刷新页面。');
         btnStart.disabled = false; btnStart.textContent = '启动';
         return;
       }
     } catch (e) {
-      showError('库加载异常：' + e.message);
+      showError('异常：' + e.message);
       btnStart.disabled = false; btnStart.textContent = '启动';
       return;
     }
@@ -1046,19 +983,18 @@ async function startAll() {
       detector = prewarmedDetector;
       prewarmedDetector = null;
       prewarmKey = '';
-      prewarmStatus = 'none';
       setLibStatus('✅ 使用预热模型（秒开）', 'ok');
     } else {
       btnStart.textContent = '加载模型...';
-      setLibStatus('⏳ 加载模型中...');
       if (detector) { try { detector.dispose(); } catch (e) {} detector = null; }
       detector = await createDetector();
       setLibStatus('✅ 模型已就绪', 'ok');
     }
 
     INFER_HZ = parseInt(inferHzEl.value) || 8;
-    MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.05;
+    MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.03;
     DEAD_ZONE = parseFloat(deadZoneEl.value) || 3;
+    STILL_THRESHOLD = parseFloat(stillThresholdEl.value) || 30;
 
     if (!videoStream) {
       try { await startCamera(); }
@@ -1067,7 +1003,9 @@ async function startAll() {
 
     lockedBox = null; lockedMissFrames = 0; lockAge = 0;
     latestPersons = []; latestPersonsTime = 0; lastDrawnTime = 0;
-    smoothDx = 0; smoothDy = 0;
+    smoothAimX = 0; smoothAimY = 0; aimInitialized = false;
+    lastAimX = 0; lastAimY = 0; lastAimTime = 0; targetSpeed = 0;
+    smoothSendDx = 0; smoothSendDy = 0;
     inferCount = 0; inferTimer = performance.now();
     fpsCount = 0; fpsTimer = performance.now();
 
@@ -1093,12 +1031,10 @@ function stopAll() {
   fpsEl.textContent = '0'; videoFpsEl.textContent = '0'; inferFpsEl.textContent = '0';
   dxEl.textContent = '0'; dyEl.textContent = '0';
   latestPersons = []; lockedBox = null; lockedMissFrames = 0; lockAge = 0;
-  smoothDx = 0; smoothDy = 0;
+  aimInitialized = false; targetSpeed = 0;
   vstatusEl.textContent = '已停止'; vstatusEl.style.color = '#ffb74d';
 
-  if (tfReady()) {
-    setTimeout(() => prewarmModel(), 500);
-  }
+  if (tfReady()) setTimeout(() => prewarmModel(), 500);
 }
 
 function resetLock() {
@@ -1118,7 +1054,7 @@ async function reopenCamera() {
     if (wasRunning) { running = true; detectLoop(); renderLoop(); }
     showInfo('摄像头已重开：' + video.videoWidth + '×' + video.videoHeight);
     setTimeout(hideWarn, 2500);
-  } catch (e) { console.warn('reopen failed', e); }
+  } catch (e) {}
 }
 
 // ============================================================
@@ -1130,23 +1066,26 @@ btnStop.addEventListener('click', stopAll);
 btnResetLock.addEventListener('click', resetLock);
 btnReopen.addEventListener('click', reopenCamera);
 
-// ★ 速度调节立即生效
 moveSpeedEl.addEventListener('change', () => {
-  MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.05;
-  if (running) {
-    showInfo('光标跟随速度已改为 ' + MOVE_GAIN + '（立即生效）');
-    setTimeout(hideWarn, 2000);
-  }
+  MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.03;
+  if (running) { showInfo('速度改为 ' + MOVE_GAIN); setTimeout(hideWarn, 1500); }
   localStorage.setItem('pref_moveSpeed', moveSpeedEl.value);
 });
-
 deadZoneEl.addEventListener('change', () => {
   DEAD_ZONE = parseFloat(deadZoneEl.value) || 3;
-  if (running) {
-    showInfo('死区已改为 ' + DEAD_ZONE + ' px（立即生效）');
-    setTimeout(hideWarn, 2000);
-  }
+  if (running) { showInfo('死区改为 ' + DEAD_ZONE + ' px'); setTimeout(hideWarn, 1500); }
   localStorage.setItem('pref_deadZone', deadZoneEl.value);
+});
+stillThresholdEl.addEventListener('change', () => {
+  STILL_THRESHOLD = parseFloat(stillThresholdEl.value) || 30;
+  if (running) { showInfo('静止阈值改为 ' + STILL_THRESHOLD + ' px/s'); setTimeout(hideWarn, 1500); }
+  localStorage.setItem('pref_stillThreshold', stillThresholdEl.value);
+});
+
+// ★ 切换镜头时立即更新镜像
+camFacingEl.addEventListener('change', () => {
+  updateMirror();
+  if (running) showInfo('镜头已切换，请"停止 → 启动"重新打开摄像头');
 });
 
 roiEnabledEl.addEventListener('change', () => { roiEnabled = roiEnabledEl.checked; updateRoiInfo(); });
@@ -1157,28 +1096,24 @@ roiPercentEl.addEventListener('input', () => {
 });
 function updateRoiInfo() { roiInfoEl.textContent = roiEnabled ? ('中央 ' + roiPercent + '%') : '已禁用'; }
 
-[camResEl, camFacingEl, maxPosesEl].forEach(el => {
-  el.addEventListener('change', () => {
-    if (running) showInfo('此设置需要"停止 → 启动"才能生效');
-  });
+[camResEl, maxPosesEl].forEach(el => {
+  el.addEventListener('change', () => { if (running) showInfo('此设置需要"停止 → 启动"才能生效'); });
 });
 
 minScoreEl.addEventListener('change', () => {
-  if (running) { showInfo('置信度已改为 ' + minScoreEl.value + '（立即生效）'); setTimeout(hideWarn, 2000); }
+  if (running) { showInfo('置信度改为 ' + minScoreEl.value); setTimeout(hideWarn, 1500); }
 });
-
 inferHzEl.addEventListener('change', () => {
   INFER_HZ = parseInt(inferHzEl.value) || 8;
-  if (running) { showInfo('推理频率已改为 ' + INFER_HZ + ' Hz（立即生效）'); setTimeout(hideWarn, 2000); }
+  if (running) { showInfo('推理频率改为 ' + INFER_HZ + ' Hz'); setTimeout(hideWarn, 1500); }
 });
-
 targetModeEl.addEventListener('change', resetLock);
 
 const savedIp = localStorage.getItem('espIp');
 if (savedIp) espIpEl.value = savedIp;
 espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.value));
 
-['aimPart', 'targetMode', 'inferHz', 'minScore', 'maxPoses', 'moveSpeed', 'deadZone'].forEach(id => {
+['aimPart', 'targetMode', 'inferHz', 'minScore', 'maxPoses', 'moveSpeed', 'deadZone', 'stillThreshold'].forEach(id => {
   const el = document.getElementById(id);
   const saved = localStorage.getItem('pref_' + id);
   if (saved !== null && el) el.value = saved;
@@ -1201,8 +1136,9 @@ camFacingEl.value = 'user';
 roiEnabled = roiEnabledEl.checked;
 roiPercent = parseInt(roiPercentEl.value);
 INFER_HZ = parseInt(inferHzEl.value) || 8;
-MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.05;
+MOVE_GAIN = parseFloat(moveSpeedEl.value) || 0.03;
 DEAD_ZONE = parseFloat(deadZoneEl.value) || 3;
+STILL_THRESHOLD = parseFloat(stillThresholdEl.value) || 30;
 roiPercentValEl.textContent = roiPercent + '%';
 updateRoiInfo();
 </script>
