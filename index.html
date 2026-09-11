@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v13（预热）</title>
+<title>视觉跟随 · v14（翻转开关）</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -11,6 +11,19 @@
   .video-wrap { position: relative; width: 100%; max-width: 480px; border: 2px solid #4fc3f7; border-radius: 6px; overflow: hidden; background: #000; }
   video#video { width: 100%; display: block; }
   canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+
+  /* ★ 左右翻转：video 和 canvas 一起翻转，视觉上保持对齐 */
+  .video-wrap.flip video,
+  .video-wrap.flip canvas {
+    transform: scaleX(-1);
+  }
+  /* 状态文字反向翻转，保证正常可读 */
+  .video-wrap.flip .vstatus {
+    transform: scaleX(-1);
+    right: 4px;
+    left: auto;
+  }
+
   .crosshair { position: absolute; top: 50%; left: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; z-index: 3; }
   .crosshair::before, .crosshair::after { content: ''; position: absolute; background: #ffd54f; box-shadow: 0 0 3px #000; }
   .crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
@@ -63,9 +76,9 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v13（预热）</h1>
+<h1>视觉跟随 · v14</h1>
 
-<div class="video-wrap">
+<div class="video-wrap" id="videoWrap">
   <video id="video" autoplay playsinline muted></video>
   <canvas id="overlay"></canvas>
   <div class="crosshair"></div>
@@ -106,6 +119,15 @@
       <option value="1080">1920×1080</option>
     </select>
     <button id="btnReopen" class="ghost" style="flex:0 0 auto; padding:4px 8px; font-size:0.7rem;">重开</button>
+  </div>
+  <!-- ★ 左右翻转开关 -->
+  <div class="row">
+    <label>翻转</label>
+    <label class="switch">
+      <input type="checkbox" id="flipEnabled" checked>
+      <span class="slider"></span>
+    </label>
+    <span style="font-size:0.7rem; color:#9bc4e2;">左右镜像（前置默认勾选，画面变"正常视角"）</span>
   </div>
   <div class="row">
     <label>模型</label>
@@ -241,7 +263,7 @@ const LIB_CDNS = [
     pd: 'https://unpkg.com/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js' }
 ];
 
-function loadScript(src, timeoutMs = 12000) {   // ★ 20s → 12s，减少等待
+function loadScript(src, timeoutMs = 12000) {
   return new Promise((resolve, reject) => {
     const s = document.createElement('script');
     s.src = src; s.async = false;
@@ -255,7 +277,6 @@ function loadScript(src, timeoutMs = 12000) {   // ★ 20s → 12s，减少等�
 
 async function loadLibs() {
   const statusEl = document.getElementById('libStatus');
-  // ★ 优先尝试上次成功的 CDN（缓存命中会很快）
   const lastCdn = localStorage.getItem('lastLibCdn');
   if (lastCdn) {
     const idx = LIB_CDNS.findIndex(c => c.name === lastCdn);
@@ -279,9 +300,7 @@ async function loadLibs() {
         localStorage.setItem('lastLibCdn', cdn.name);
         return true;
       }
-    } catch (e) {
-      console.warn('[Libs]', cdn.name, 'failed:', e.message);
-    }
+    } catch (e) { console.warn('[Libs]', cdn.name, 'failed:', e.message); }
   }
   statusEl.textContent = '❌ 所有 CDN 加载失败，请检查网络后刷新页面';
   statusEl.className = 'lib-status err';
@@ -335,12 +354,12 @@ let lastDrawnPosesTime = 0;
 
 let scaleX = 1, scaleY = 1;
 let actualFacing = '';
+let flipEnabled = true;   // ★ 左右翻转
 
-// ★ 预热相关
 let prewarmedDetector = null;
 let prewarmKey = '';
 let prewarmPromise = null;
-let prewarmStatus = 'none';   // none / loading / ready / failed
+let prewarmStatus = 'none';
 
 // ============================================================
 // DOM
@@ -348,6 +367,7 @@ let prewarmStatus = 'none';   // none / loading / ready / failed
 const video = document.getElementById('video');
 const overlay = document.getElementById('overlay');
 const ctx = overlay.getContext('2d');
+const videoWrap = document.getElementById('videoWrap');
 const espIpEl = document.getElementById('espIp');
 const wsStatusEl = document.getElementById('wsStatus');
 const personCountEl = document.getElementById('personCount');
@@ -372,6 +392,7 @@ const maxPosesEl = document.getElementById('maxPoses');
 const inferHzEl = document.getElementById('inferHz');
 const camResEl = document.getElementById('camRes');
 const camFacingEl = document.getElementById('camFacing');
+const flipEnabledEl = document.getElementById('flipEnabled');
 const canvasSizeEl = document.getElementById('canvasSize');
 const roiEnabledEl = document.getElementById('roiEnabled');
 const roiPercentEl = document.getElementById('roiPercent');
@@ -394,6 +415,15 @@ function showOk(msg)    { warnBox.textContent = msg; warnBox.className = 'warn-b
 function hideWarn()     { warnBox.className = 'warn-box'; }
 function tfReady()      { return (typeof window.tf !== 'undefined' && typeof window.poseDetection !== 'undefined'); }
 function setLibStatus(msg, cls) { libStatusEl.textContent = msg; libStatusEl.className = 'lib-status' + (cls ? ' ' + cls : ''); }
+
+// ★ 应用左右翻转
+function applyFlip() {
+  if (flipEnabled) {
+    videoWrap.classList.add('flip');
+  } else {
+    videoWrap.classList.remove('flip');
+  }
+}
 
 // ============================================================
 // WebSocket
@@ -424,7 +454,7 @@ function sendAim(dx, dy, hasTarget) {
 }
 
 // ============================================================
-// ★ 预热模型（后台静默下载）
+// 预热模型
 // ============================================================
 function getConfigKey() {
   return modelTypeEl.value + '|' + inputSizeEl.value + '|' + maxPosesEl.value;
@@ -452,15 +482,12 @@ async function prewarmModel() {
   if (!tfReady()) return;
 
   const key = getConfigKey();
-  // 已经预热好同一个配置
   if (prewarmedDetector && prewarmKey === key) return;
-  // 正在预热同一个配置
   if (prewarmPromise && prewarmKey === key) {
     try { await prewarmPromise; } catch (e) {}
     return;
   }
 
-  // 配置变了，释放旧 detector
   if (prewarmedDetector) {
     try { prewarmedDetector.dispose(); } catch (e) {}
     prewarmedDetector = null;
@@ -472,7 +499,6 @@ async function prewarmModel() {
 
   prewarmPromise = (async () => {
     try {
-      // 确保 WebGL
       try { await tf.setBackend('webgl'); await tf.ready(); } catch (e) {}
       const backend = tf.getBackend();
       tfBackendEl.textContent = backend;
@@ -495,24 +521,21 @@ async function prewarmModel() {
   try { await prewarmPromise; } finally { prewarmPromise = null; }
 }
 
-// 页面 load 后自动预热
 window.addEventListener('load', () => {
   setTimeout(async () => {
     const ok = await libsPromise;
     if (!ok) return;
     await prewarmModel();
-  }, 500);   // 500ms 后开始预热，别和页面渲染抢资源
+  }, 500);
 });
 
-// 用户改模型参数时，重新预热
 [modelTypeEl, inputSizeEl, maxPosesEl].forEach(el => {
   el.addEventListener('change', () => {
     if (tfReady() && !running) {
-      // 释放旧 detector
       if (prewarmedDetector) { try { prewarmedDetector.dispose(); } catch (e) {} prewarmedDetector = null; }
       prewarmKey = '';
       prewarmStatus = 'none';
-      setTimeout(prewarmModel, 200);   // 稍等再预热，防抖
+      setTimeout(prewarmModel, 200);
     }
   });
 });
@@ -878,9 +901,7 @@ function renderLoop() {
     if (video.videoWidth === 0) diag = '⚠ 摄像头没有画面。请点"重开"按钮。';
     else if (backend === '?') diag = '⏳ TF 库还在加载中，请稍等...';
     else if (backend !== 'webgl' && backend !== 'webgpu') diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）';
-    else if (vidFps > 0 && vidFps < 15) {
-      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 请切"前置"或换更低分辨率';
-    }
+    else if (vidFps > 0 && vidFps < 15) diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 请切"前置"或换更低分辨率';
     else if (fps < 30) diag = '⚠ rAF 只有 ' + fps + ' fps —— 把推理频率降到 6Hz';
     else if (infFps < 5 && INFER_HZ >= 8) diag = '⚠ 推理只跑了 ' + infFps + ' Hz（目标 ' + INFER_HZ + '）';
 
@@ -995,7 +1016,7 @@ function drawOverlay(cw, ch, screenCx, screenCy) {
 }
 
 // ============================================================
-// 创建检测器（备用，非预热路径）
+// 创建检测器
 // ============================================================
 async function createDetector() {
   if (!tfReady()) throw new Error('TensorFlow.js 库未加载');
@@ -1034,7 +1055,6 @@ async function startAll() {
   hideWarn();
 
   try {
-    // ★ 尝试使用预热好的 detector
     const key = getConfigKey();
     if (prewarmedDetector && prewarmKey === key) {
       if (detector) { try { detector.dispose(); } catch (e) {} }
@@ -1043,9 +1063,7 @@ async function startAll() {
       prewarmKey = '';
       prewarmStatus = 'none';
       setLibStatus('✅ 使用预热模型（秒开）', 'ok');
-      console.log('[Start] 使用预热好的 detector');
     } else {
-      // 未预热或参数变了，现加载
       btnStart.textContent = '加载模型...';
       setLibStatus('⏳ 加载模型中...');
       if (detector) { try { detector.dispose(); } catch (e) {} detector = null; }
@@ -1070,12 +1088,6 @@ async function startAll() {
     btnStart.textContent = '运行中...';
     detectLoop();
     renderLoop();
-
-    // 停后重新后台预热，下次再点启动能秒开
-    setTimeout(() => {
-      if (!running) return;
-      // 已经在用，不需要预热
-    }, 1000);
   } catch (err) {
     console.error(err);
     showError('启动失败：' + err.message);
@@ -1095,7 +1107,6 @@ function stopAll() {
   latestPoses = []; lockedTrackId = null; lockedMissFrames = 0; lockAge = 0;
   vstatusEl.textContent = '已停止'; vstatusEl.style.color = '#ffb74d';
 
-  // 停止后，重新后台预热，方便再次启动
   if (tfReady()) {
     setTimeout(() => prewarmModel(), 500);
   }
@@ -1129,6 +1140,15 @@ btnStart.addEventListener('click', startAll);
 btnStop.addEventListener('click', stopAll);
 btnResetLock.addEventListener('click', resetLock);
 btnReopen.addEventListener('click', reopenCamera);
+
+// ★ 翻转开关
+flipEnabledEl.addEventListener('change', () => {
+  flipEnabled = flipEnabledEl.checked;
+  applyFlip();
+  localStorage.setItem('flipEnabled', flipEnabled ? '1' : '0');
+  showInfo(flipEnabled ? '左右镜像：已开启（正常视角）' : '左右镜像：已关闭（浏览器默认）');
+  setTimeout(hideWarn, 1800);
+});
 
 roiEnabledEl.addEventListener('change', () => { roiEnabled = roiEnabledEl.checked; updateRoiInfo(); });
 roiPercentEl.addEventListener('input', () => {
@@ -1170,6 +1190,17 @@ espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.v
 
 camResEl.value = 'auto';
 camFacingEl.value = 'user';
+
+// ★ 翻转默认值：优先读上次保存，没有就默认勾选
+const savedFlip = localStorage.getItem('flipEnabled');
+if (savedFlip === null) {
+  flipEnabledEl.checked = true;
+  flipEnabled = true;
+} else {
+  flipEnabledEl.checked = (savedFlip === '1');
+  flipEnabled = flipEnabledEl.checked;
+}
+applyFlip();
 
 ['roiEnabled', 'roiPercent'].forEach(id => {
   const el = document.getElementById(id);
