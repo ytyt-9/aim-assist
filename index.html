@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>视觉跟随 · v11（后置优化）</title>
+<title>视觉跟随 · v12（前置）</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1b2a; color: #eee; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 8px; }
@@ -14,7 +14,7 @@
   .crosshair { position: absolute; top: 50%; left: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px; pointer-events: none; z-index: 3; }
   .crosshair::before, .crosshair::after { content: ''; position: absolute; background: #ffd54f; box-shadow: 0 0 3px #000; }
   .crosshair::before { left: 10px; top: 0; width: 2px; height: 22px; }
-  .crosshair::after { top: 10px; left: 0; width: 2px; height: 2px; height: 22px; }
+  .crosshair::after { top: 10px; left: 0; width: 22px; height: 2px; }
   .video-wrap .vstatus { position: absolute; left: 4px; bottom: 4px; background: rgba(0,0,0,0.7); color: #7cff7c; font-family: monospace; font-size: 0.62rem; padding: 2px 5px; border-radius: 3px; z-index: 4; pointer-events: none; }
   .panel { width: 100%; max-width: 480px; margin-top: 8px; background: #16213e; border-radius: 6px; padding: 8px; }
   .row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 0.82rem; flex-wrap: wrap; }
@@ -63,7 +63,7 @@
 </head>
 <body>
 
-<h1>视觉跟随 · v11（后置优化）</h1>
+<h1>视觉跟随 · v12（前置）</h1>
 
 <div class="video-wrap">
   <video id="video" autoplay playsinline muted></video>
@@ -91,8 +91,8 @@
   <div class="row">
     <label>镜头</label>
     <select id="camFacing">
-      <option value="environment" selected>后置（默认）</option>
-      <option value="user">前置（流畅）</option>
+      <option value="user" selected>前置（默认，流畅）</option>
+      <option value="environment">后置（可能卡）</option>
     </select>
   </div>
   <div class="row">
@@ -402,10 +402,10 @@ function sendAim(dx, dy, hasTarget) {
 }
 
 // ============================================================
-// 摄像头（★ 多分辨率尝试 + 帧率限制）
+// 摄像头（多分辨率自动尝试 + 帧率限制）
 // ============================================================
 async function startCamera() {
-  const mode = camResEl.value;   // 'auto' 或具体数字
+  const mode = camResEl.value;
   const facing = camFacingEl.value;
 
   if (videoStream) {
@@ -417,7 +417,6 @@ async function startCamera() {
   vstatusEl.textContent = '打开摄像头中...';
   vstatusEl.style.color = '#ffb74d';
 
-  // 分辨率候选列表（从低到高，找到第一个能跑的就用）
   const candidates = (mode === 'auto')
     ? [
         { w: 320, h: 240, label: '320×240' },
@@ -430,9 +429,7 @@ async function startCamera() {
          label: mode + 'p' }];
 
   let stream = null;
-  let usedLabel = '';
 
-  // 尝试每个分辨率
   for (const c of candidates) {
     console.log('[Camera] 尝试 ' + c.label + ' · ' + facing);
 
@@ -440,17 +437,13 @@ async function startCamera() {
       facingMode: { ideal: facing },
       width: { ideal: c.w },
       height: { ideal: c.h },
-      frameRate: { ideal: 30, max: 30 }   // ★ 限制最高 30fps
+      frameRate: { ideal: 30, max: 30 }
     };
 
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
       const settings = stream.getVideoTracks()[0].getSettings();
-      const realW = settings.width || 0;
-      const realH = settings.height || 0;
-      const realFps = settings.frameRate || 0;
-      console.log('[Camera] ✅ ' + c.label + ' OK -> 实际 ' + realW + '×' + realH + ' @ ' + realFps + 'fps');
-      usedLabel = realW + '×' + realH;
+      console.log('[Camera] ✅ ' + c.label + ' OK -> 实际 ' + settings.width + '×' + settings.height + ' @ ' + settings.frameRate + 'fps');
       actualFacing = settings.facingMode || '';
       break;
     } catch (e) {
@@ -459,16 +452,13 @@ async function startCamera() {
     }
   }
 
-  // 所有分辨率都失败 → 兜底
   if (!stream) {
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: facing } }, audio: false });
-      usedLabel = '兜底';
       actualFacing = stream.getVideoTracks()[0].getSettings().facingMode || '';
     } catch (e) {
       try {
         stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-        usedLabel = '兜底2';
         actualFacing = stream.getVideoTracks()[0].getSettings().facingMode || '';
       } catch (e2) {
         vstatusEl.textContent = '打开失败';
@@ -783,7 +773,7 @@ function renderLoop() {
     else if (backend === '?') diag = '⏳ TF 库还在加载中，请稍等...';
     else if (backend !== 'webgl' && backend !== 'webgpu') diag = '⚠ TF 后端是 "' + backend + '"（不是 webgl）';
     else if (vidFps > 0 && vidFps < 15) {
-      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 这个镜头这一档不支持。请试试：① "摄像头"改成"自动适配"重开 ② 换成"前置" ③ 手机重启';
+      diag = '⚠ 摄像头只有 ' + vidFps + ' fps —— 请切"前置"或换更低分辨率';
     }
     else if (fps < 30) diag = '⚠ rAF 只有 ' + fps + ' fps —— 把推理频率降到 6Hz';
     else if (infFps < 5 && INFER_HZ >= 8) diag = '⚠ 推理只跑了 ' + infFps + ' Hz（目标 ' + INFER_HZ + '）';
@@ -1061,8 +1051,10 @@ espIpEl.addEventListener('change', () => localStorage.setItem('espIp', espIpEl.v
   if (el) el.addEventListener('change', () => localStorage.setItem('pref_' + id, el.value));
 });
 
+// ★ 默认前置
+localStorage.removeItem('pref_camRes');
 camResEl.value = 'auto';
-camFacingEl.value = 'environment';
+camFacingEl.value = 'user';
 
 ['roiEnabled', 'roiPercent'].forEach(id => {
   const el = document.getElementById(id);
